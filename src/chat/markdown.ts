@@ -237,7 +237,7 @@ export function renderMd(text: string): Promise<string> {
     return applyBlocks('<p>' + escapeHtml(extracted.text).replace(/\n/g, '<br>') + '</p>')
   }
   const api = getApi()
-  if (!api || !api.call) return Promise.resolve(fallback())
+  if (!api || !api.callPlugin) return Promise.resolve(fallback())
   return api
     .callPlugin('top.qomicex.markdown', 'renderMarkdown', extracted.text)
     .then((html) => applyBlocks(String(html)))
