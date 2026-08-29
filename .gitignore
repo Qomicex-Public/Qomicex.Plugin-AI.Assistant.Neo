@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+release/
+
+# Signature
+signature.cert.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Memory
+.memory/
+
+# Logs
+$log/
+*.log
+
+# Playwright MCP
+.playwright-mcp/

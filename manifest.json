@@ -1,0 +1,45 @@
+{
+  "id": "top.qomicex.assistant",
+  "name": "AI 助手",
+  "version": "2.0.0",
+  "minLauncherVersion": "0.1.0",
+  "layers": ["l2", "l3"],
+  "permissions": [
+    "config:read",
+    "config:write",
+    "network:fetch",
+    "network:cors_proxy",
+    "cache:access",
+    "filesystem:read",
+    "filesystem:write",
+    "shell:execute",
+    "ui:toast",
+    "download:manage",
+    "instance:write"
+  ],
+  "dependencies": [
+    { "id": "top.qomicex.markdown", "version": ">=1.0.0" }
+  ],
+  "entry": {
+    "frontend": "dist/index.html",
+    "theme": "dist/theme.css"
+  },
+  "contributes": {
+    "menuItems": [
+      {
+        "path": "/plugins/p/top.qomicex.assistant",
+        "label": "AI 助手",
+        "icon": "fa-solid fa-robot",
+        "action": "overlay"
+      }
+    ],
+    "overlay": {
+      "file": "dist/overlay.html",
+      "title": "AI 助手",
+      "width": 380,
+      "height": 500,
+      "minimizable": false,
+      "resizable": true
+    }
+  }
+}
