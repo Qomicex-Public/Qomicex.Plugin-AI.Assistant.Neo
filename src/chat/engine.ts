@@ -5,7 +5,11 @@ import { toolDefs } from './toolDefs.ts'
 import { handlers, setApiRef, toolNamesCN, type ToolArgs } from './handlers.ts'
 import { streamTurn, type StreamTurnCtx } from './stream.ts'
 import { compressContext, manualCompress, summarizeToolResult, estimateTokens, loadDsTokenizer, type CompressDeps } from './compress.ts'
-import { renderMd } from './markdown.ts'
+import { renderMd, renderMdSync } from './markdown.ts'
+
+/** 流式尾部渐入的目标标签：marked 把段落合并进列表项，故 li 是最稳的块边界。 */
+const STREAM_TARGET = 'li'
+const CURSOR = '<span class="stream-cursor">&#9621;</span>'
 
 export interface EngineSnapshot {
   cfg: {
@@ -99,17 +103,21 @@ function updateAiHtml(id: number, html: string, streaming?: boolean, content?: s
 }
 
 function addProgress(msg: string, type: string) {
+  if (!state.showToolProcess) return
   pushUi({ kind: 'progress', content: (type === 'error' ? '  ✗' : type === 'result' ? '  ←' : type === 'call' ? '  →' : type === 'thought' ? '+ Thought' : '  •') + ' ' + msg })
 }
 
 function addToolEntry(toolName: string, argsText: string, timeMs: number): number {
+  // 「显示工具调用过程」关闭时仍要执行工具，只是不渲染条目。返回 -1 供调用方跳过结果写入。
+  if (!state.showToolProcess) return -1
   const cn = toolNamesCN[toolName] || toolName
-  const base = '✦ 调用 ' + cn + ' (' + toolName + ') - ' + timeMs + 'ms'
-  const id = pushUi({ kind: 'tool', toolName: toolName, content: base, toolArgsText: argsText, toolLines: [], collapsed: false })
+  const base = '✦ 调用 ' + cn + ' (' + toolName + ') · ' + timeMs + 'ms'
+  const id = pushUi({ kind: 'tool', toolName: toolName, content: base, toolArgsText: argsText, toolLines: [], collapsed: true })
   return id
 }
 
 function addToolResult(detailId: number, resultText: string) {
+  if (detailId < 0) return
   const line: ToolEntryLine = { result: resultText }
   ui = ui.map((m) => (m.id === detailId ? { ...m, toolLines: [...(m.toolLines || []), line] } : m))
   emit()
@@ -247,31 +255,78 @@ export async function sendMessage(text: string): Promise<void> {
     aiDivCreated = true
   }
 
+  /**
+   * 把「上一个 HTML」和「新 HTML」的差异包进渐入标签。
+   *
+   * 不能用长度前缀切分：重建的 HTML 在标签中间长度会变（`**b` → `<strong>b`），
+   * 前缀切分会把 `<span>` 插进标签内部，产出非法 HTML（实测 `<td>` 被切断导致
+   * 表格坍缩、代码块被破坏）。这里改为在**块标签边界**注入：
+   * 找到公共前缀后，回退到最后一个块标签（`</li>` 等）的结束位置，只对边界之后
+   * 的新增内容做渐入，保证插入点始终位于标签之间。
+   */
+  function markDelta(prev: string, next: string): string {
+    if (!prev) return next
+    let p = 0
+    const max = Math.min(prev.length, next.length)
+    while (p < max && prev.charCodeAt(p) === next.charCodeAt(p)) p++
+
+    // 仅当新增内容在末尾（常见流式追加）时才做渐入；结构性变化直接整体替换。
+    if (p >= prev.length) {
+      let cut = p
+      let safe = -1
+      for (;;) {
+        const lt = next.lastIndexOf('<', cut)
+        if (lt < 0) break
+        const gt = next.indexOf('>', lt)
+        if (gt >= cut) {
+          safe = gt + 1
+          break
+        }
+        cut = lt - 1
+        if (cut <= 0) break
+      }
+      if (safe > 0) {
+        const delta = next.slice(safe)
+        if (!delta) return next
+        const close = next.lastIndexOf('</' + STREAM_TARGET + '>')
+        if (close >= safe) {
+          return (
+            next.slice(0, close) +
+            '</' + STREAM_TARGET + '><span class="stream-fade">' +
+            delta +
+            '</span>'
+          )
+        }
+        return next.slice(0, safe) + '<span class="stream-fade">' + delta + '</span>'
+      }
+    }
+    return next
+  }
+
   function onDelta(content: string) {
     fullContent = content
-    if (!state.showToolProcess) return
     ensureAiDiv()
     const now = Date.now()
-    if (now - lastEmit > 250) {
-      lastEmit = now
-      updateAiPlain(aiMsgId!, content)
+    if (now - lastRender < 70) {
+      // 节流窗口内先给纯文本，保证首字立刻可见（不等 Markdown 重排）
+      if (now - lastEmit > 90) {
+        lastEmit = now
+        updateAiPlain(aiMsgId!, content)
+      }
+      return
     }
-    if (now - lastRender < 80) return
     lastRender = now
     const seq = ++renderSeq
-    renderMd(content).then((newHtml) => {
-      if (seq !== renderSeq) return
-      const prefixLen = Math.min(lastHtml.length, newHtml.length)
-      const staticPart = newHtml.slice(0, prefixLen)
-      const deltaPart = newHtml.slice(prefixLen)
-      lastHtml = newHtml
-      updateAiHtml(aiMsgId!, staticPart + (deltaPart ? '<span class="stream-fade">' + deltaPart + '</span>' : '') + '<span class="stream-cursor">&#9621;</span>', true, content)
-    })
+    const prev = lastHtml
+    const html = renderMdSync(content)
+    lastHtml = html
+    if (seq !== renderSeq) return
+    updateAiHtml(aiMsgId!, markDelta(prev, html) + CURSOR, true, content)
   }
 
   function finalizeContent() {
     renderSeq++
-    renderMd(fullContent || '').then((html) => {
+    return renderMd(fullContent || '').then((html) => {
       ensureAiDiv()
       updateAiHtml(aiMsgId!, html, false, fullContent || '')
     })

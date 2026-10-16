@@ -1,3 +1,4 @@
+import { marked } from 'marked'
 import { getApi } from '../api.ts'
 
 export function escapeHtml(s: unknown): string {
@@ -6,6 +7,25 @@ export function escapeHtml(s: unknown): string {
 
 export function isEmpty(s: string | null | undefined): boolean {
   return !s || /^(空|无|none|null|空白)$/i.test(String(s).trim())
+}
+
+// marked 实例：与 MarkdownLib 一致（GFM 默认开启，表格/删除线/任务列表可用）。
+marked.setOptions({ gfm: true, breaks: false })
+
+/**
+ * 内置兜底渲染：优先调用 MarkdownLib（共享实现），失败时用打包进本插件的
+ * marked 渲染，避免任何情况下退化成纯文本。
+ *
+ * 为什么需要兜底：宿主 `createSandbox` 对无 menuItems 的库插件不会把 iframe
+ * 挂到 DOM，srcdoc iframe 不挂载即不执行脚本，导致 MarkdownLib 的方法从未注册、
+ * callPlugin 必然 reject（已用 CDP 实测证明）。兜底让本插件对宿主缺陷免疫。
+ */
+function renderBuiltin(md: string): string {
+  try {
+    return marked.parse(md || '', { async: false }) as string
+  } catch {
+    return '<p>' + escapeHtml(md).replace(/\n/g, '<br>') + '</p>'
+  }
 }
 
 // ---------- info 图鉴卡片 ----------
@@ -20,14 +40,14 @@ export function renderInfoBlock(body: string): string {
   return (
     '<div class="info-card" data-info-name="' +
     escapeHtml(name) +
-    '" style="display:flex;align-items:center;gap:12px;background:hsl(var(--background));border-radius:8px;padding:10px;margin:4px 0;max-width:100%">' +
-    '<div style="width:56px;height:56px;flex-shrink:0;border-radius:6px;background:hsl(var(--muted));display:flex;align-items:center;justify-content:center;font-size:11px;color:hsl(var(--muted-foreground));overflow:hidden">' +
+    '">' +
+    '<div class="info-card-icon">' +
     escapeHtml(name[0] || '') +
     '</div>' +
-    '<div style="min-width:0"><div style="font-size:13px;font-weight:600;color:hsl(var(--foreground))">' +
+    '<div class="info-card-body"><div class="info-card-name">' +
     escapeHtml(name) +
     '</div>' +
-    (cat ? '<div style="font-size:11px;color:hsl(var(--muted-foreground));margin-top:2px">' + escapeHtml(cat) + '</div>' : '') +
+    (cat ? '<div class="info-card-cat">' + escapeHtml(cat) + '</div>' : '') +
     '</div></div>'
   )
 }
@@ -39,15 +59,9 @@ export function renderSuggestBlock(body: string): string {
     .map((s) => s.trim())
     .filter(Boolean)
   if (items.length === 0) return ''
-  let html =
-    '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid hsl(var(--border))">'
+  let html = '<div class="suggest-row">'
   items.forEach((item) => {
-    html +=
-      '<button class="suggest-chip" data-suggest="' +
-      escapeHtml(item) +
-      '" style="padding:4px 10px;border-radius:12px;border:1px solid hsl(var(--border));background:hsl(var(--muted));color:hsl(var(--muted-foreground));font-size:11px;cursor:pointer;line-height:1.2;text-align:left;transition:all .15s">' +
-      escapeHtml(item) +
-      '</button>'
+    html += '<button class="suggest-chip" data-suggest="' + escapeHtml(item) + '">' + escapeHtml(item) + '</button>'
   })
   html += '</div>'
   return html
@@ -112,39 +126,34 @@ export function renderCraftingGrid(body: string): string {
     if (hasKeys) return grid[['A', 'B', 'C'][r] + (c + 1)] || ''
     return (rows[r] && rows[r][c]) || ''
   }
-  const base =
-    'border:1px solid hsl(var(--border));border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;text-align:center;overflow:hidden;padding:2px;box-sizing:border-box;background:hsl(var(--muted));position:relative'
   function cellHtml(item: string, isOutput: boolean): string {
     const names = String(item)
       .split(/[;,、]/)
       .map((s) => s.trim())
       .filter(Boolean)
       .filter((s) => !isEmpty(s))
-    const w = isOutput ? 52 : 42
-    let style = base + ';width:' + w + 'px;height:' + w + 'px'
-    if (isOutput) style += ';border-color:hsl(var(--primary))'
     const attr = names.length ? ' data-items="' + escapeHtml(JSON.stringify(names)) + '"' : ''
     const text = names.length ? escapeHtml(names[0]) : ''
     return (
-      '<div' +
+      '<div class="craft-cell' +
+      (isOutput ? ' craft-cell--out' : '') +
+      '"' +
       attr +
-      ' style="' +
-      style +
-      '">' +
+      '>' +
       text +
-      (isOutput && count > 1 ? '<span style="font-size:9px;color:hsl(var(--muted-foreground))">x' + count + '</span>' : '') +
+      (isOutput && count > 1 ? '<span class="craft-count">x' + count + '</span>' : '') +
       '</div>'
     )
   }
-  let html = '<div style="display:inline-flex;align-items:center;gap:10px;background:hsl(var(--background));border-radius:8px;padding:10px;margin:4px 0">'
-  html += '<div style="display:grid;grid-template-columns:repeat(3,42px);gap:4px">'
+  let html = '<div class="craft-wrap">'
+  html += '<div class="craft-grid">'
   for (let r = 0; r < 3; r++) {
     for (let c = 0; c < 3; c++) {
       html += cellHtml(cell(r, c), false)
     }
   }
   html += '</div>'
-  html += '<div style="color:hsl(var(--muted-foreground));font-size:16px">&#8594;</div>'
+  html += '<div class="craft-arrow">&#8594;</div>'
   html += cellHtml(output, true)
   html += '</div>'
   return html
@@ -158,21 +167,18 @@ export function renderRecipeBlock(body: string): string {
     if (eq > 0) kv[line.slice(0, eq).trim().toLowerCase()] = line.slice(eq + 1).trim()
   })
   const type = kv.type || 'smelting'
-  const ws =
-    kv.workstation || (type === 'smithing' ? '锻造台' : type === 'anvil' ? '铁砧' : type === 'stonecutting' ? '切石机' : '熔炉')
-  const itemStyle =
-    'width:46px;height:46px;border:1px solid hsl(var(--border));border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;text-align:center;overflow:hidden;padding:2px;box-sizing:border-box;background:hsl(var(--muted));position:relative'
+  const ws = kv.workstation || (type === 'smithing' ? '锻造台' : type === 'anvil' ? '铁砧' : type === 'stonecutting' ? '切石机' : '熔炉')
   function itemHtml(name: string): string {
-    if (isEmpty(name)) return '<div style="' + itemStyle + '"></div>'
+    if (isEmpty(name)) return '<div class="craft-cell"></div>'
     const names = String(name)
       .split(/[;,、]/)
       .map((s) => s.trim())
       .filter(Boolean)
       .filter((s) => !isEmpty(s))
-    return '<div data-items="' + escapeHtml(JSON.stringify(names)) + '" style="' + itemStyle + '">' + escapeHtml(names[0]) + '</div>'
+    return '<div class="craft-cell" data-items="' + escapeHtml(JSON.stringify(names)) + '">' + escapeHtml(names[0]) + '</div>'
   }
   function slotRow(itemsHtml: string[], sep: string): string {
-    return '<div style="display:flex;align-items:center;gap:8px">' + itemsHtml.join('<span style="color:hsl(var(--muted-foreground));font-size:12px">' + sep + '</span>') + '</div>'
+    return '<div class="recipe-slot-row">' + itemsHtml.join('<span class="recipe-op">' + sep + '</span>') + '</div>'
   }
   let bodyHtml = ''
   if (type === 'smithing' || type === 'anvil') {
@@ -180,9 +186,9 @@ export function renderRecipeBlock(body: string): string {
   } else {
     bodyHtml = slotRow([itemHtml(kv.input || kv.material)], '')
   }
-  let html = '<div style="display:flex;flex-direction:column;gap:8px;background:hsl(var(--background));border-radius:8px;padding:10px;margin:4px 0;align-items:center">'
-  html += '<div style="display:flex;flex-direction:column;align-items:center;gap:2px">' + itemHtml(ws) + '<span style="font-size:10px;color:hsl(var(--muted-foreground))">' + escapeHtml(ws) + '</span></div>'
-  html += '<div style="display:flex;align-items:center;gap:10px">' + bodyHtml + '<span style="color:hsl(var(--primary));font-size:14px">&#8594;</span>' + itemHtml(kv.output) + '</div>'
+  let html = '<div class="recipe-wrap">'
+  html += '<div class="recipe-station">' + itemHtml(ws) + '<span class="recipe-station-name">' + escapeHtml(ws) + '</span></div>'
+  html += '<div class="recipe-flow">' + bodyHtml + '<span class="recipe-arrow">&#8594;</span>' + itemHtml(kv.output) + '</div>'
   html += '</div>'
   return html
 }
@@ -224,8 +230,15 @@ export function extractSpecialBlocks(text: string): { text: string; blocks: stri
   return { text: out.join('\n'), blocks: blocks }
 }
 
+/**
+ * 渲染 Markdown：MarkdownLib 优先，失败回退到内置 marked。
+ * 返回 HTML 字符串（含 `<p>` 包裹），供 dangerouslySetInnerHTML 使用。
+ *
+ * 注意：内置兜底为**同步**返回，因此即使 MarkdownLib 不可用，首帧也能拿到
+ * 正确 HTML，不会出现「先纯文本、后跳变」的闪烁。
+ */
 export function renderMd(text: string): Promise<string> {
-  const extracted = extractSpecialBlocks(text)
+  const extracted = extractSpecialBlocks(text || '')
   function applyBlocks(html: string): string {
     extracted.blocks.forEach((g, i) => {
       if (html.indexOf('<p>@@CRAFTING' + i + '@@</p>') >= 0) html = html.replace('<p>@@CRAFTING' + i + '@@</p>', g)
@@ -233,13 +246,30 @@ export function renderMd(text: string): Promise<string> {
     })
     return html
   }
-  function fallback(): string {
-    return applyBlocks('<p>' + escapeHtml(extracted.text).replace(/\n/g, '<br>') + '</p>')
-  }
+
   const api = getApi()
-  if (!api || !api.callPlugin) return Promise.resolve(fallback())
-  return api
-    .callPlugin('top.qomicex.markdown', 'renderMarkdown', extracted.text)
-    .then((html) => applyBlocks(String(html)))
-    .catch(() => fallback())
+  if (!api || !api.callPlugin) return Promise.resolve(applyBlocks(renderBuiltin(extracted.text)))
+
+  return Promise.resolve()
+    .then(() => api.callPlugin('top.qomicex.markdown', 'renderMarkdown', extracted.text))
+    .then((html) => {
+      const s = String(html == null ? '' : html)
+      // MarkdownLib 返回空串视为失败，走内置兜底（例如输入仅含被提取的特殊块）
+      if (extracted.text.trim() && !s.trim()) return applyBlocks(renderBuiltin(extracted.text))
+      return applyBlocks(s)
+    })
+    .catch(() => applyBlocks(renderBuiltin(extracted.text)))
+}
+
+/** 同步渲染：仅用于必须同步拿到 HTML 的场景（当前未使用，保留 API 对称）。 */
+export function renderMdSync(text: string): string {
+  const extracted = extractSpecialBlocks(text || '')
+  const html = renderBuiltin(extracted.text)
+  const blocks = extracted.blocks
+  let out = html
+  blocks.forEach((g, i) => {
+    if (out.indexOf('<p>@@CRAFTING' + i + '@@</p>') >= 0) out = out.replace('<p>@@CRAFTING' + i + '@@</p>', g)
+    out = out.split('@@CRAFTING' + i + '@@').join(g)
+  })
+  return out
 }

@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@qomicex/plugin-ui": "^0.2.1",
+    "marked": "^15.0.12",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
