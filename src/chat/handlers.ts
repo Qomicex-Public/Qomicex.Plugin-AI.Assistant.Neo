@@ -443,7 +443,6 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
   checkHealth: () => api!.call('callBackend', '/health'),
   listPlugins: () => api!.call('callBackend', '/plugins'),
   listLogs: () => api!.call('callBackend', '/logs'),
-  parseModpack: () => ({ error: 'parseModpack 需要上传文件，无法通过 AI 调用。如需安装整合包请用 installModpack' }),
   installModpack: (a) => {
     if (!a.id || !a.gameDir) return { error: 'id 和 gameDir 必填' }
     const local = !!(a.path && a.path.trim())
@@ -635,7 +634,15 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
         if (msg.indexOf('FS_AUTHORIZATION_REQUIRED') >= 0) {
           return { error: '需要授权访问该路径（启动器已弹出授权窗口，允许后重试）: ' + path }
         }
-        return { error: 'MarkItDown 转换失败（请确认已安装 MarkItDown 插件）: ' + msg }
+        if (/未提供方法|not initialized|未安装/.test(msg)) {
+          return {
+            error:
+              'MarkItDown 插件不可用（' +
+              msg +
+              '）。请在「设置 → 插件」确认 top.qomicex.markitdown 已安装并启用；若已启用仍失败，说明启动器未加载该库插件，请改用 readFile 或反馈该问题。',
+          }
+        }
+        return { error: 'MarkItDown 转换失败: ' + msg }
       })
   },
   writeFile: (a) => {
@@ -682,7 +689,7 @@ export const toolNamesCN: Record<string, string> = {
   getSystemInfo: '系统信息', getLauncherSettings: '启动器设置', getConnectorStatus: '联机状态',
   hostRoom: '开房', joinRoom: '加入房间', getNatType: 'NAT 检测',
   checkHealth: '健康检查', listPlugins: '插件列表', listLogs: '日志列表',
-  parseModpack: '解析整合包', installModpack: '安装整合包', addCustomJava: '添加 Java', listLoaderVersions: '加载器版本',
+  installModpack: '安装整合包', addCustomJava: '添加 Java', listLoaderVersions: '加载器版本',
   getVersionMetadata: '版本元数据', checkUpdate: '检查更新',
   searchWiki: 'Wiki 搜索', getWikiContent: 'Wiki 内容',
   searchMcMod: 'MC百科搜索', getMcmodContent: 'MC百科内容',

@@ -1,7 +1,7 @@
 {
   "id": "top.qomicex.assistant",
   "name": "AI 助手",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "minLauncherVersion": "0.1.0",
   "layers": ["l2", "l3"],
   "permissions": [
@@ -18,7 +18,8 @@
     "instance:write"
   ],
   "dependencies": [
-    { "id": "top.qomicex.markdown", "version": ">=1.0.0" }
+    { "id": "top.qomicex.markdown", "version": ">=1.0.0" },
+    { "id": "top.qomicex.markitdown", "version": ">=0.1.0" }
   ],
   "entry": {
     "frontend": "dist/index.html",
@@ -33,12 +34,13 @@
         "action": "overlay"
       }
     ],
+    "settingsPages": ["dist/index.html"],
     "overlay": {
       "file": "dist/overlay.html",
       "title": "AI 助手",
-      "width": 380,
-      "height": 500,
-      "minimizable": false,
+      "width": 420,
+      "height": 620,
+      "minimizable": true,
       "resizable": true
     }
   }

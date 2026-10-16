@@ -5,7 +5,9 @@ import { toolDefs } from './toolDefs.ts'
 import { handlers, setApiRef, toolNamesCN, type ToolArgs } from './handlers.ts'
 import { streamTurn, type StreamTurnCtx } from './stream.ts'
 import { compressContext, manualCompress, summarizeToolResult, estimateTokens, loadDsTokenizer, type CompressDeps } from './compress.ts'
-import { renderMd } from './markdown.ts'
+import { renderMd, renderMdSync } from './markdown.ts'
+
+const CURSOR = '<span class="stream-cursor">&#9621;</span>'
 
 export interface EngineSnapshot {
   cfg: {
@@ -99,17 +101,21 @@ function updateAiHtml(id: number, html: string, streaming?: boolean, content?: s
 }
 
 function addProgress(msg: string, type: string) {
+  if (!state.showToolProcess) return
   pushUi({ kind: 'progress', content: (type === 'error' ? '  ✗' : type === 'result' ? '  ←' : type === 'call' ? '  →' : type === 'thought' ? '+ Thought' : '  •') + ' ' + msg })
 }
 
 function addToolEntry(toolName: string, argsText: string, timeMs: number): number {
+  // 「显示工具调用过程」关闭时仍要执行工具，只是不渲染条目。返回 -1 供调用方跳过结果写入。
+  if (!state.showToolProcess) return -1
   const cn = toolNamesCN[toolName] || toolName
-  const base = '✦ 调用 ' + cn + ' (' + toolName + ') - ' + timeMs + 'ms'
-  const id = pushUi({ kind: 'tool', toolName: toolName, content: base, toolArgsText: argsText, toolLines: [], collapsed: false })
+  const base = '✦ 调用 ' + cn + ' (' + toolName + ') · ' + timeMs + 'ms'
+  const id = pushUi({ kind: 'tool', toolName: toolName, content: base, toolArgsText: argsText, toolLines: [], collapsed: true })
   return id
 }
 
 function addToolResult(detailId: number, resultText: string) {
+  if (detailId < 0) return
   const line: ToolEntryLine = { result: resultText }
   ui = ui.map((m) => (m.id === detailId ? { ...m, toolLines: [...(m.toolLines || []), line] } : m))
   emit()
@@ -247,31 +253,56 @@ export async function sendMessage(text: string): Promise<void> {
     aiDivCreated = true
   }
 
+  /**
+   * 把「上一个 HTML」和「新 HTML」的差异包进渐入标签。
+   *
+   * 不能用长度前缀切分：重建的 HTML 在标签中间长度会变（`**b` → `<strong>b`），
+   * 前缀切分会把 `<span>` 插进标签内部，产出非法 HTML（实测 `<td>` 被切断导致
+   * 表格坍缩、代码块被破坏）。
+   *
+   * 这里只做**可证明安全**的注入：找到公共前缀后，仅当插入点位于文本内容中
+   * （不在标签内部），且新增片段的开头是纯文本时，才把这段纯文本包进 `<span>`；
+   * 其余情况（结构性变化、标签内部、片段以标签开头）一律整体替换，不做动画。
+   */
+  function markDelta(prev: string, next: string): string {
+    if (!prev || prev === next) return next
+    let p = 0
+    const max = Math.min(prev.length, next.length)
+    while (p < max && prev.charCodeAt(p) === next.charCodeAt(p)) p++
+    if (p >= next.length) return next
+    // p 落在标签内部（其前面最近的 '<' 尚未被 '>' 闭合）→ 注入会破坏标签
+    if (next.lastIndexOf('<', p - 1) > next.lastIndexOf('>', p - 1)) return next
+    const delta = next.slice(p)
+    const lt = delta.search(/[<>]/)
+    const text = lt < 0 ? delta : delta.slice(0, lt)
+    if (!text) return next
+    return next.slice(0, p) + '<span class="stream-fade">' + text + '</span>' + next.slice(p + text.length)
+  }
+
   function onDelta(content: string) {
     fullContent = content
-    if (!state.showToolProcess) return
     ensureAiDiv()
     const now = Date.now()
-    if (now - lastEmit > 250) {
-      lastEmit = now
-      updateAiPlain(aiMsgId!, content)
+    if (now - lastRender < 70) {
+      // 节流窗口内先给纯文本，保证首字立刻可见（不等 Markdown 重排）
+      if (now - lastEmit > 90) {
+        lastEmit = now
+        updateAiPlain(aiMsgId!, content)
+      }
+      return
     }
-    if (now - lastRender < 80) return
     lastRender = now
     const seq = ++renderSeq
-    renderMd(content).then((newHtml) => {
-      if (seq !== renderSeq) return
-      const prefixLen = Math.min(lastHtml.length, newHtml.length)
-      const staticPart = newHtml.slice(0, prefixLen)
-      const deltaPart = newHtml.slice(prefixLen)
-      lastHtml = newHtml
-      updateAiHtml(aiMsgId!, staticPart + (deltaPart ? '<span class="stream-fade">' + deltaPart + '</span>' : '') + '<span class="stream-cursor">&#9621;</span>', true, content)
-    })
+    const prev = lastHtml
+    const html = renderMdSync(content)
+    lastHtml = html
+    if (seq !== renderSeq) return
+    updateAiHtml(aiMsgId!, markDelta(prev, html) + CURSOR, true, content)
   }
 
   function finalizeContent() {
     renderSeq++
-    renderMd(fullContent || '').then((html) => {
+    return renderMd(fullContent || '').then((html) => {
       ensureAiDiv()
       updateAiHtml(aiMsgId!, html, false, fullContent || '')
     })

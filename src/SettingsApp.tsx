@@ -12,6 +12,8 @@ export default function SettingsApp() {
   })
   const [md, setMd] = useState({ baseUrl: 'https://api.deepseek.com/v1', apiKey: '', visionModel: 'gpt-4o-mini', audioModel: 'gpt-4o-audio-preview' })
   const [mdStatus, setMdStatus] = useState<{ text: string; color?: string }>({ text: '' })
+  // MarkItDown 可用性：未激活时明确提示，而不是静默失败
+  const [mdReady, setMdReady] = useState<boolean | null>(null)
 
   useEffect(() => {
     const api = getApi()
@@ -32,6 +34,7 @@ export default function SettingsApp() {
     api
       .call('callPlugin', 'top.qomicex.markitdown', 'getConfig')
       .then((c: any) => {
+        setMdReady(true)
         c = c || {}
         setMd({
           baseUrl: c.baseUrl || 'https://api.deepseek.com/v1',
@@ -40,7 +43,7 @@ export default function SettingsApp() {
           audioModel: c.audioModel || 'gpt-4o-audio-preview',
         })
       })
-      .catch(() => {})
+      .catch(() => setMdReady(false))
   }, [])
 
   function setMdStatusText(msg: string, color?: string) {
@@ -82,7 +85,18 @@ export default function SettingsApp() {
 
         <div className="p-card" style={{ marginTop: 14 }}>
           <div className="p-card-content" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div style={{ fontWeight: 600, color: 'hsl(var(--foreground))' }}>MarkItDown 文档转换（图片 OCR / 音频转写）</div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <div style={{ fontWeight: 600, color: 'hsl(var(--foreground))' }}>MarkItDown 文档转换（图片 OCR / 音频转写）</div>
+              {mdReady === false && (
+                <span style={{ flexShrink: 0, fontSize: 11, color: 'hsl(var(--destructive))' }}>未启用</span>
+              )}
+              {mdReady === true && <span style={{ flexShrink: 0, fontSize: 11, color: 'hsl(var(--primary))' }}>已连接</span>}
+            </div>
+            {mdReady === false && (
+              <div style={{ fontSize: 12, color: 'hsl(var(--destructive))', lineHeight: 1.6 }}>
+                未能调用 MarkItDown 插件（top.qomicex.markitdown）。请确认它已在「插件管理」中安装并启用；若已启用仍提示此项，属于启动器未加载纯功能库插件的问题，文档转换将不可用。
+              </div>
+            )}
             <div>
               <label className="p-label">视觉 / 音频 API 地址</label>
               <input type="url" className="p-input" value={md.baseUrl} onChange={(e) => setMd({ ...md, baseUrl: e.target.value })} placeholder="https://api.deepseek.com/v1" />

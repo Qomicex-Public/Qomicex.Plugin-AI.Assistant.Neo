@@ -383,14 +383,6 @@ export const toolDefs: ToolDef[] = [
   {
     type: 'function',
     function: {
-      name: 'parseModpack',
-      description: '解析整合包文件（需要提供服务器上的文件路径或上传）',
-      parameters: { type: 'object', properties: {}, required: [] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
       name: 'installModpack',
       description: '安装 Minecraft 整合包。本地来源传 path（.zip/.mrpack）；在线来源传 type(mr/cf/ftb)+projectId+fileId。自动创建实例并下载，gameDir 必填',
       parameters: {
