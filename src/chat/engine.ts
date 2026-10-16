@@ -7,8 +7,6 @@ import { streamTurn, type StreamTurnCtx } from './stream.ts'
 import { compressContext, manualCompress, summarizeToolResult, estimateTokens, loadDsTokenizer, type CompressDeps } from './compress.ts'
 import { renderMd, renderMdSync } from './markdown.ts'
 
-/** 流式尾部渐入的目标标签：marked 把段落合并进列表项，故 li 是最稳的块边界。 */
-const STREAM_TARGET = 'li'
 const CURSOR = '<span class="stream-cursor">&#9621;</span>'
 
 export interface EngineSnapshot {
@@ -260,47 +258,25 @@ export async function sendMessage(text: string): Promise<void> {
    *
    * 不能用长度前缀切分：重建的 HTML 在标签中间长度会变（`**b` → `<strong>b`），
    * 前缀切分会把 `<span>` 插进标签内部，产出非法 HTML（实测 `<td>` 被切断导致
-   * 表格坍缩、代码块被破坏）。这里改为在**块标签边界**注入：
-   * 找到公共前缀后，回退到最后一个块标签（`</li>` 等）的结束位置，只对边界之后
-   * 的新增内容做渐入，保证插入点始终位于标签之间。
+   * 表格坍缩、代码块被破坏）。
+   *
+   * 这里只做**可证明安全**的注入：找到公共前缀后，仅当插入点位于文本内容中
+   * （不在标签内部），且新增片段的开头是纯文本时，才把这段纯文本包进 `<span>`；
+   * 其余情况（结构性变化、标签内部、片段以标签开头）一律整体替换，不做动画。
    */
   function markDelta(prev: string, next: string): string {
-    if (!prev) return next
+    if (!prev || prev === next) return next
     let p = 0
     const max = Math.min(prev.length, next.length)
     while (p < max && prev.charCodeAt(p) === next.charCodeAt(p)) p++
-
-    // 仅当新增内容在末尾（常见流式追加）时才做渐入；结构性变化直接整体替换。
-    if (p >= prev.length) {
-      let cut = p
-      let safe = -1
-      for (;;) {
-        const lt = next.lastIndexOf('<', cut)
-        if (lt < 0) break
-        const gt = next.indexOf('>', lt)
-        if (gt >= cut) {
-          safe = gt + 1
-          break
-        }
-        cut = lt - 1
-        if (cut <= 0) break
-      }
-      if (safe > 0) {
-        const delta = next.slice(safe)
-        if (!delta) return next
-        const close = next.lastIndexOf('</' + STREAM_TARGET + '>')
-        if (close >= safe) {
-          return (
-            next.slice(0, close) +
-            '</' + STREAM_TARGET + '><span class="stream-fade">' +
-            delta +
-            '</span>'
-          )
-        }
-        return next.slice(0, safe) + '<span class="stream-fade">' + delta + '</span>'
-      }
-    }
-    return next
+    if (p >= next.length) return next
+    // p 落在标签内部（其前面最近的 '<' 尚未被 '>' 闭合）→ 注入会破坏标签
+    if (next.lastIndexOf('<', p - 1) > next.lastIndexOf('>', p - 1)) return next
+    const delta = next.slice(p)
+    const lt = delta.search(/[<>]/)
+    const text = lt < 0 ? delta : delta.slice(0, lt)
+    if (!text) return next
+    return next.slice(0, p) + '<span class="stream-fade">' + text + '</span>' + next.slice(p + text.length)
   }
 
   function onDelta(content: string) {
