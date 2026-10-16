@@ -25,3 +25,4 @@ $log/
 
 # Playwright MCP
 .playwright-mcp/
+overlay-inline.ts

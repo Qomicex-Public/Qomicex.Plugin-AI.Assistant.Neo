@@ -1,7 +1,7 @@
 {
   "id": "top.qomicex.assistant",
   "name": "AI 助手",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "minLauncherVersion": "0.1.0",
   "layers": ["l2", "l3"],
   "permissions": [
@@ -14,15 +14,16 @@
     "filesystem:write",
     "shell:execute",
     "ui:toast",
+    "ui:sub_window",
     "download:manage",
     "instance:write"
   ],
   "dependencies": [
-    { "id": "top.qomicex.markdown", "version": ">=1.0.0" },
-    { "id": "top.qomicex.markitdown", "version": ">=0.1.0" }
+    { "id": "top.qomicex.markdown", "version": ">=1.0.0", "optional": true },
+    { "id": "top.qomicex.markitdown", "version": ">=0.1.0", "optional": true }
   ],
   "entry": {
-    "frontend": "dist/index.html",
+    "frontend": "dist/agent.html",
     "theme": "dist/theme.css"
   },
   "contributes": {
@@ -31,17 +32,10 @@
         "path": "/plugins/p/top.qomicex.assistant",
         "label": "AI 助手",
         "icon": "fa-solid fa-robot",
-        "action": "overlay"
+        "action": "page"
       }
     ],
-    "settingsPages": ["dist/index.html"],
-    "overlay": {
-      "file": "dist/overlay.html",
-      "title": "AI 助手",
-      "width": 420,
-      "height": 620,
-      "minimizable": true,
-      "resizable": true
-    }
+    "slots": [{ "slot": "header:right", "file": "dist/slots.html", "width": 300, "height": 36 }],
+    "settingsPages": ["dist/index.html"]
   }
 }

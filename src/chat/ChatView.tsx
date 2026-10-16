@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
 import type { UiMessage } from './types.ts'
+import { getApi } from '../api.ts'
 import {
   getSnapshot,
   subscribe,
@@ -9,14 +10,24 @@ import {
   sendMessage,
   stopGeneration,
   newChat,
-  showConfigView,
   showChatView,
   manualCompressCtx,
   toggleToolEntry,
+  refreshConversations,
+  openConversation,
+  removeConversation,
+  renameConv,
 } from './engine.ts'
 import { loadGridImages, loadInfoImages } from './images.ts'
 import ConfigForm from '../components/ConfigForm.tsx'
 import { copyText, openExternal } from '../lib/clipboard.ts'
+
+export interface ChatViewProps {
+  /** page = agent 路由页（历史常驻侧栏）；overlay = 悬浮窗（历史抽屉） */
+  variant?: 'page' | 'overlay'
+  /** 启动后自动发送的文本（胶囊 handoff 用） */
+  initialMessage?: string | null
+}
 
 function FlowingText({ text }: { text: string }) {
   return (
@@ -30,7 +41,7 @@ function FlowingText({ text }: { text: string }) {
   )
 }
 
-type IconName = 'stop' | 'refresh' | 'settings' | 'chevron' | 'copy' | 'check'
+type IconName = 'stop' | 'refresh' | 'settings' | 'chevron' | 'copy' | 'check' | 'history' | 'close' | 'trash' | 'send'
 function Icon({ name, size = 15 }: { name: IconName; size?: number }) {
   const p = {
     width: size,
@@ -64,6 +75,14 @@ function Icon({ name, size = 15 }: { name: IconName; size?: number }) {
           <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1" />
         </svg>
       )
+    case 'history':
+      return (
+        <svg {...p}>
+          <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+          <path d="M3 3v5h5" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+      )
     case 'chevron':
       return (
         <svg {...p}>
@@ -75,6 +94,24 @@ function Icon({ name, size = 15 }: { name: IconName; size?: number }) {
         <svg {...p}>
           <rect x="9" y="9" width="12" height="12" rx="2" />
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )
+    case 'trash':
+      return (
+        <svg {...p}>
+          <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
+        </svg>
+      )
+    case 'close':
+      return (
+        <svg {...p}>
+          <path d="M6 6l12 12M18 6L6 18" />
+        </svg>
+      )
+    case 'send':
+      return (
+        <svg {...p}>
+          <path d="M5 12h14M13 6l6 6-6 6" />
         </svg>
       )
     case 'check':
@@ -103,7 +140,6 @@ function bindLinks(container: Element) {
   }
 }
 
-/** 给每个代码块加语言标记与「复制」按钮（幂等：靠 data-enhanced 去重）。 */
 function enhanceCodeBlocks(container: Element) {
   const pres = container.querySelectorAll('pre')
   for (let i = 0; i < pres.length; i++) {
@@ -146,7 +182,13 @@ const lineStyle: CSSProperties = {
   wordBreak: 'break-word',
 }
 
-export default function ChatApp() {
+/** 打开启动器系统级插件设置并定位到本插件。 */
+export function openPluginSettings() {
+  const api = getApi()
+  if (api && api.call) api.call('openPluginSettings').catch(() => {})
+}
+
+export default function ChatView({ variant = 'overlay', initialMessage = null }: ChatViewProps) {
   const snapshot = useSyncExternalStore(subscribe, getSnapshot)
   const [input, setInput] = useState('')
   const inputRef = useRef('')
@@ -154,6 +196,10 @@ export default function ChatApp() {
   const msgsRef = useRef<HTMLDivElement>(null)
   const processedRef = useRef<Set<number>>(new Set())
   const [copiedId, setCopiedId] = useState<number | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameText, setRenameText] = useState('')
+  const bootstrapped = useRef(false)
 
   useEffect(() => {
     init()
@@ -168,8 +214,16 @@ export default function ChatApp() {
       },
       focus: () => inputElRef.current?.focus(),
     })
+    if (variant === 'page') void refreshConversations()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 胶囊 handoff：初次挂载时消费待发消息
+  useEffect(() => {
+    if (bootstrapped.current || !initialMessage) return
+    bootstrapped.current = true
+    void sendMessage(initialMessage)
+  }, [initialMessage])
 
   useEffect(() => {
     function onDragOver(e: DragEvent) {
@@ -212,7 +266,7 @@ export default function ChatApp() {
       }
     }
     el.scrollTop = el.scrollHeight
-  }, [snapshot.ui])
+  }, [snapshot.ui, historyOpen])
 
   function bindSuggestChips(container: Element) {
     const chips = container.querySelectorAll('.suggest-chip')
@@ -273,12 +327,7 @@ export default function ChatApp() {
                 )}
               </div>
               {!m.streaming && m.content ? (
-                <button
-                  className="msg-copy"
-                  type="button"
-                  title="复制回答"
-                  onClick={() => doCopyAi(m)}
-                >
+                <button className="msg-copy" type="button" title="复制回答" onClick={() => doCopyAi(m)}>
                   <Icon name={copiedId === m.id ? 'check' : 'copy'} size={13} />
                   {copiedId === m.id ? '已复制' : '复制'}
                 </button>
@@ -336,84 +385,225 @@ export default function ChatApp() {
     }
   }
 
-  const ctxPct = snapshot.ctxUsage.text || ''
+  const historyList = useMemo(() => {
+    const list = snapshot.conversations
+    return list.map((c) => ({
+      ...c,
+      label: c.title || '新对话',
+      time: formatWhen(c.updatedAt),
+    }))
+  }, [snapshot.conversations])
+
+  function closeHistory() {
+    setHistoryOpen(false)
+    setRenamingId(null)
+  }
+
+  const historyPanel = (
+    <div className={variant === 'page' ? 'history-side' : 'history-drawer'}>
+      <div className="history-head">
+        <span className="history-title">历史对话</span>
+        <div className="history-head-actions">
+          <button
+            className="icon-btn"
+            type="button"
+            title="新对话"
+            onClick={() => {
+              newChat()
+              closeHistory()
+            }}
+          >
+            <Icon name="refresh" size={13} />
+          </button>
+          {variant === 'overlay' && (
+            <button className="icon-btn" type="button" title="关闭" onClick={closeHistory}>
+              <Icon name="close" size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="history-list">
+        {historyList.length === 0 && <div className="history-empty">还没有历史对话</div>}
+        {historyList.map((c) => (
+          <div key={c.id} className={'history-item' + (c.id === snapshot.conversationId ? ' history-item--active' : '')}>
+            {renamingId === c.id ? (
+              <input
+                className="history-rename"
+                autoFocus
+                value={renameText}
+                onChange={(e) => setRenameText(e.target.value)}
+                onBlur={() => {
+                  void renameConv(c.id, renameText.trim() || c.label)
+                  setRenamingId(null)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                  if (e.key === 'Escape') setRenamingId(null)
+                }}
+              />
+            ) : (
+              <button
+                className="history-item-main"
+                type="button"
+                onClick={() => {
+                  void openConversation(c.id)
+                  closeHistory()
+                }}
+                onDoubleClick={() => {
+                  setRenamingId(c.id)
+                  setRenameText(c.label)
+                }}
+                title="双击重命名"
+              >
+                <span className="history-item-title">{c.label}</span>
+                <span className="history-item-meta">
+                  {c.time}
+                  {c.count ? ' · ' + c.count + ' 条' : ''}
+                </span>
+              </button>
+            )}
+            <button
+              className="history-del"
+              type="button"
+              title="删除"
+              onClick={() => void removeConversation(c.id)}
+            >
+              <Icon name="trash" size={12} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 
   return (
-    <div className="chat-root">
-      <header className="chat-head">
-        <div className="chat-head-left">
-          <span className="chat-title">AI 助手</span>
-          {snapshot.cfg.configured && (
-            <button
-              className={'ctx-badge' + (snapshot.ctxUsage.warn ? ' ctx-badge--warn' : '')}
-              title="上下文用量，点击手动压缩"
-              type="button"
-              onClick={manualCompressCtx}
-            >
-              {ctxPct}
+    <div className={'chat-root' + (variant === 'page' ? ' chat-root--page' : '')}>
+      {variant === 'page' && historyPanel}
+      <div className="chat-main">
+        <header className="chat-head">
+          <div className="chat-head-left">
+            {variant === 'overlay' && (
+              <button
+                className="icon-btn"
+                type="button"
+                title="历史对话"
+                onClick={() => {
+                  const next = !historyOpen
+                  setHistoryOpen(next)
+                  if (next) void refreshConversations()
+                }}
+              >
+                <Icon name="history" />
+              </button>
+            )}
+            <span className="chat-title">{snapshot.cfg.configured ? snapshot.conversationTitle : 'AI 助手'}</span>
+            {snapshot.cfg.configured && snapshot.ctxUsage.text && (
+              <button
+                className={'ctx-badge' + (snapshot.ctxUsage.warn ? ' ctx-badge--warn' : '')}
+                title="上下文用量，点击手动压缩"
+                type="button"
+                onClick={manualCompressCtx}
+              >
+                {snapshot.ctxUsage.text}
+              </button>
+            )}
+          </div>
+          <div className="chat-head-actions">
+            {snapshot.cfg.thinking && (
+              <button className="icon-btn icon-btn--danger" title="停止输出" type="button" onClick={stopGeneration}>
+                <Icon name="stop" />
+              </button>
+            )}
+            <button className="icon-btn" title="新对话" type="button" onClick={newChat}>
+              <Icon name="refresh" />
             </button>
-          )}
-        </div>
-        <div className="chat-head-actions">
-          {snapshot.cfg.thinking && (
-            <button className="icon-btn icon-btn--danger" title="停止输出" type="button" onClick={stopGeneration}>
-              <Icon name="stop" />
+            <button className="icon-btn" title="设置（启动器插件设置）" type="button" onClick={openPluginSettings}>
+              <Icon name="settings" />
             </button>
-          )}
-          <button className="icon-btn" title="新对话" type="button" onClick={newChat}>
-            <Icon name="refresh" />
-          </button>
-          <button className="icon-btn" title="设置" type="button" onClick={showConfigView}>
-            <Icon name="settings" />
-          </button>
-        </div>
-      </header>
+          </div>
+        </header>
 
-      {snapshot.view === 'chat' ? (
-        <>
-          <div ref={msgsRef} className="chat-msgs">
-            {snapshot.ui.map(renderMessage)}
+        {snapshot.view === 'chat' ? (
+          <>
+            <div ref={msgsRef} className="chat-msgs">
+              {snapshot.ui.map(renderMessage)}
+            </div>
+            <div className="chat-input-bar">
+              <textarea
+                ref={inputElRef}
+                className="chat-input"
+                rows={1}
+                value={input}
+                onChange={(e) => {
+                  inputRef.current = e.target.value
+                  setInput(e.target.value)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    doSend()
+                  }
+                }}
+                placeholder="输入消息，Enter 发送 · Shift+Enter 换行"
+              />
+              <button className="send-btn" type="button" onClick={doSend} disabled={!input.trim()}>
+                发送
+              </button>
+            </div>
+            <div className="chat-hint">Enter 发送 · Shift+Enter 换行 · /compact 压缩上下文</div>
+          </>
+        ) : snapshot.view === 'history' ? (
+          <div className="chat-config">
+            <div className="p-card">
+              <div className="p-card-content">
+                <button className="p-btn p-btn--outline" type="button" onClick={showChatView}>
+                  返回对话
+                </button>
+              </div>
+            </div>
           </div>
-          <div className="chat-input-bar">
-            <textarea
-              ref={inputElRef}
-              className="chat-input"
-              rows={1}
-              value={input}
-              onChange={(e) => {
-                inputRef.current = e.target.value
-                setInput(e.target.value)
+        ) : (
+          <div className="chat-config">
+            <ConfigForm
+              initial={{
+                baseUrl: snapshot.cfg.baseUrl,
+                apiKey: snapshot.cfg.apiKey,
+                model: snapshot.cfg.model,
+                maxCtx: snapshot.cfg.maxCtx,
+                showToolProcess: snapshot.cfg.showToolProcess,
               }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  doSend()
-                }
-              }}
-              placeholder="输入消息，Enter 发送 · Shift+Enter 换行"
+              onSaved={showChatView}
+              onBack={snapshot.cfg.configured ? showChatView : undefined}
+              submitLabel="保存并开始"
             />
-            <button className="send-btn" type="button" onClick={doSend} disabled={!input.trim()}>
-              发送
-            </button>
+            <div className="config-hint">
+              <button className="p-btn p-btn--ghost" type="button" onClick={openPluginSettings}>
+                打开启动器插件设置（含 MarkItDown 配置）
+              </button>
+            </div>
           </div>
-          <div className="chat-hint">Enter 发送 · Shift+Enter 换行 · /compact 压缩上下文</div>
+        )}
+      </div>
+
+      {variant === 'overlay' && historyOpen && (
+        <>
+          <div className="history-scrim" onClick={closeHistory} />
+          {historyPanel}
         </>
-      ) : (
-        <div className="chat-config">
-          <ConfigForm
-            initial={{
-              baseUrl: snapshot.cfg.baseUrl,
-              apiKey: snapshot.cfg.apiKey,
-              model: snapshot.cfg.model,
-              maxCtx: snapshot.cfg.maxCtx,
-              showToolProcess: snapshot.cfg.showToolProcess,
-            }}
-            onSaved={showChatView}
-            onBack={snapshot.cfg.configured ? showChatView : undefined}
-            submitLabel="保存并开始"
-          />
-        </div>
       )}
     </div>
   )
+}
+
+function formatWhen(ts: number): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  const y = new Date(now.getTime() - 86400000)
+  const isYesterday = d.toDateString() === y.toDateString()
+  const pad = (n: number) => (n < 10 ? '0' + n : String(n))
+  if (sameDay) return pad(d.getHours()) + ':' + pad(d.getMinutes())
+  if (isYesterday) return '昨天'
+  return d.getMonth() + 1 + '/' + d.getDate()
 }

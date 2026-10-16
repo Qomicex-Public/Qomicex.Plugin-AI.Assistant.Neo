@@ -32,15 +32,195 @@ body {
 }
 
 /* ============================ 布局 ============================ */
+.plugin-slot {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  overflow: visible;
+}
+
 .chat-root {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   height: 100%;
   min-height: 0;
   min-width: 300px;
   font-size: 13px;
   overflow: hidden;
   background: hsl(var(--background));
+  position: relative;
+}
+
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.agent-boot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: hsl(var(--muted-foreground));
+  font-size: 20px;
+}
+
+/* ---------- 历史对话（agent 页常驻侧栏 / 悬浮窗抽屉） ---------- */
+.history-side {
+  width: 208px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid hsl(var(--border));
+  background: hsl(var(--card) / 0.5);
+}
+.history-drawer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 232px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: hsl(var(--card));
+  border-right: 1px solid hsl(var(--border));
+  box-shadow: 0 8px 30px hsl(0 0% 0% / 0.35);
+  animation: slideIn 0.16s ease-out;
+}
+.history-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  background: hsl(0 0% 0% / 0.28);
+}
+@keyframes slideIn {
+  from {
+    transform: translateX(-8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid hsl(var(--border));
+  flex-shrink: 0;
+}
+.history-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: hsl(var(--muted-foreground));
+}
+.history-head-actions {
+  display: flex;
+  gap: 2px;
+}
+.history-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.history-empty {
+  padding: 16px 8px;
+  text-align: center;
+  font-size: 11.5px;
+  color: hsl(var(--muted-foreground));
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+}
+.history-item:hover {
+  background: hsl(var(--accent) / 0.6);
+}
+.history-item--active {
+  background: hsl(var(--primary) / 0.14);
+}
+.history-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 7px;
+}
+.history-item-title {
+  font-size: 12px;
+  color: hsl(var(--foreground));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-item-meta {
+  font-size: 10px;
+  color: hsl(var(--muted-foreground));
+}
+.history-del {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 3px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  opacity: 0;
+}
+.history-item:hover .history-del {
+  opacity: 1;
+}
+.history-del:hover {
+  color: hsl(var(--destructive));
+  background: hsl(var(--destructive) / 0.12);
+}
+.history-rename {
+  flex: 1;
+  min-width: 0;
+  margin: 4px 6px;
+  padding: 4px 7px;
+  border: 1px solid hsl(var(--ring));
+  border-radius: 6px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.config-hint {
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
 }
 
 .chat-head {
@@ -779,4 +959,99 @@ input[type='range']::-webkit-slider-thumb {
   background: hsl(var(--primary));
   cursor: pointer;
   border: none;
+}
+
+/* ============================ 标题栏胶囊（header:right slot） ============================ */
+/* 槽位在 manifest 里固定为 300×36（与标题栏同高），故这里只需水平右对齐 + 垂直居中。 */
+.capsule-host {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.capsule {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 3px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  overflow: hidden;
+  transition: background-color 0.18s ease, border-color 0.18s ease, width 0.18s ease;
+  box-sizing: border-box;
+}
+.capsule:hover,
+.capsule--open {
+  border-color: hsl(var(--border));
+  background: hsl(var(--muted) / 0.55);
+}
+.capsule-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  background: hsl(var(--primary) / 0.16);
+  color: hsl(var(--primary));
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.12s ease;
+}
+.capsule-dot:hover {
+  background: hsl(var(--primary) / 0.3);
+}
+.capsule-dot:active {
+  transform: scale(0.92);
+}
+.capsule-input {
+  width: 0;
+  min-width: 0;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: hsl(var(--foreground));
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  opacity: 0;
+  transition: width 0.2s ease, opacity 0.18s ease, padding 0.18s ease;
+}
+.capsule--open .capsule-input {
+  width: 190px;
+  padding: 0 2px;
+  opacity: 1;
+}
+.capsule-input::placeholder {
+  color: hsl(var(--muted-foreground));
+}
+.capsule-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0;
+  height: 18px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  cursor: pointer;
+  opacity: 0;
+  overflow: hidden;
+  transition: width 0.2s ease, opacity 0.18s ease;
+}
+.capsule--open .capsule-send {
+  width: 20px;
+  opacity: 1;
+}
+.capsule-send:disabled {
+  opacity: 0.4;
+  cursor: default;
 }

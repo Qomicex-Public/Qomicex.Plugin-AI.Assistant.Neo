@@ -6,8 +6,20 @@ import { handlers, setApiRef, toolNamesCN, type ToolArgs } from './handlers.ts'
 import { streamTurn, type StreamTurnCtx } from './stream.ts'
 import { compressContext, manualCompress, summarizeToolResult, estimateTokens, loadDsTokenizer, type CompressDeps } from './compress.ts'
 import { renderMd, renderMdSync } from './markdown.ts'
+import {
+  type ConversationMeta,
+  deleteConversation as histDelete,
+  listConversations,
+  loadConversation,
+  newConversationId,
+  renameConversation as histRename,
+  saveConversation,
+} from './history.ts'
+import { setCurrentConversationId } from './pending.ts'
 
 const CURSOR = '<span class="stream-cursor">&#9621;</span>'
+
+const WELCOME = '你好！我是 AI 助手。有什么需要帮忙的？'
 
 export interface EngineSnapshot {
   cfg: {
@@ -19,9 +31,15 @@ export interface EngineSnapshot {
     configured: boolean
     thinking: boolean
   }
-  view: 'chat' | 'config'
+  view: 'chat' | 'config' | 'history'
   ui: UiMessage[]
   ctxUsage: { text: string; warn: boolean }
+  /** 当前会话 id */
+  conversationId: string
+  /** 当前会话标题 */
+  conversationTitle: string
+  /** 历史会话索引 */
+  conversations: ConversationMeta[]
 }
 
 // ---------- 内部状态 ----------
@@ -34,9 +52,12 @@ const state = {
   thinking: false,
   messages: [] as ChatMessage[],
 }
-let view: 'chat' | 'config' = 'chat'
+let view: 'chat' | 'config' | 'history' = 'chat'
 let ui: UiMessage[] = []
 let ctxUsage = { text: '', warn: false }
+let conversationId = newConversationId()
+let conversationTitle = '新对话'
+let conversations: ConversationMeta[] = []
 let abortCtrl: AbortController | null = null
 let stopRequested = false
 let thinkingStart = 0
@@ -61,6 +82,9 @@ function buildSnapshot(): EngineSnapshot {
     view: view,
     ui: ui,
     ctxUsage: ctxUsage,
+    conversationId: conversationId,
+    conversationTitle: conversationTitle,
+    conversations: conversations,
   }
 }
 
@@ -176,6 +200,18 @@ const compressDeps: CompressDeps = {
 }
 
 // ---------- 对话控制 ----------
+function welcomeUi(): UiMessage {
+  return { id: nextId(), kind: 'ai', content: WELCOME, streaming: false }
+}
+
+/** 采集现有 ui 里的最大 id，推进 uiSeq，避免恢复历史后新建条目与之撞 id。 */
+function syncUiSeq() {
+  for (const m of ui) {
+    if (typeof m.id === 'number' && m.id > uiSeq) uiSeq = m.id
+  }
+}
+
+/** 新对话：清空当前会话并生成新 id（写回 cache 供胶囊续接）。 */
 export function newChat() {
   state.messages = []
   if (abortCtrl) {
@@ -183,16 +219,113 @@ export function newChat() {
     abortCtrl = null
   }
   state.thinking = false
-  ui = [
-    {
-      id: nextId(),
-      kind: 'ai',
-      content: '你好！我是 AI 助手。有什么需要帮忙的？',
-      streaming: false,
-    },
-  ]
+  conversationId = newConversationId()
+  conversationTitle = '新对话'
+  ui = [welcomeUi()]
   updateCtxDisplay()
+  void setCurrentConversationId(conversationId)
 }
+
+/** 刷新历史索引（供侧边栏/历史面板展示）。 */
+export async function refreshConversations(): Promise<void> {
+  conversations = await listConversations()
+  emit()
+}
+
+/**
+ * 载入历史会话（从缓存恢复对话，UI 由 messages 重建）。
+ *
+ * 注意：即使缓存里还没有该会话的数据（例如胶囊刚建好的空会话），也必须**先接管这个 id**，
+ * 否则本界面会用自己随机生成的 id 落盘，与胶囊/其他界面引用的 id 分叉，
+ * 「继续当前会话」就失效了。
+ */
+export async function openConversation(id: string): Promise<void> {
+  if (state.thinking) return
+  const data = await loadConversation(id)
+  conversationId = id
+  conversationTitle = data?.title || '新对话'
+  state.messages = data?.messages ? data.messages.slice() : []
+  ui = rebuildUi(state.messages)
+  if (ui.length === 0) ui = [welcomeUi()]
+  // 必须先同步 uiSeq 再生成新条目，否则新 id 会与恢复的条目重复，
+  // 后续 updateAiHtml/updateAiPlain 会命中错误条目（实测表现为「思考」气泡里显示回答正文）。
+  syncUiSeq()
+  view = 'chat'
+  updateCtxDisplay()
+  void setCurrentConversationId(id)
+  // 补齐历史 AI 消息的 HTML（Markdown 兜底渲染）
+  for (const m of ui) {
+    if (m.kind === 'ai' && !m.html && m.content) {
+      const id2 = m.id
+      const text = m.content
+      renderMd(text).then((html) => {
+        ui = ui.map((x) => (x.id === id2 && x.kind === 'ai' ? { ...x, html } : x))
+        emit()
+      })
+    }
+  }
+}
+
+/**
+ * 由对话消息重建 UI 列表。
+ *
+ * 只依赖 messages 而不是持久化 ui：ui 含流式中间态（未收尾的思考、半截 html、光标），
+ * 存下来无法忠实还原（实测恢复后会出现缺失气泡、残留光标、id 撞号）。重建规则：
+ *   - user → 用户气泡
+ *   - assistant 有正文 → AI 气泡
+ *   - assistant 只有 tool_calls → 「已思考」（工具过程不持久化，避免历史里堆一堆工具卡）
+ *   - tool → 跳过（内容已进上下文，展示价值低）
+ */
+function rebuildUi(messages: ChatMessage[]): UiMessage[] {
+  const out: UiMessage[] = []
+  for (const m of messages) {
+    if (m.role === 'user') {
+      out.push({ id: nextId(), kind: 'user', content: String(m.content || '') })
+    } else if (m.role === 'assistant') {
+      const text = String(m.content || '')
+      if (!text && m.tool_calls && m.tool_calls.length) {
+        out.push({ id: nextId(), kind: 'thinking', done: true, content: '已思考' })
+      } else if (text) {
+        out.push({ id: nextId(), kind: 'ai', content: text, streaming: false })
+      }
+    }
+  }
+  return out
+}
+
+export async function removeConversation(id: string): Promise<void> {
+  await histDelete(id)
+  conversations = conversations.filter((m) => m.id !== id)
+  emit()
+  if (id === conversationId) newChat()
+}
+
+export async function renameConv(id: string, title: string): Promise<void> {
+  await histRename(id, title)
+  if (id === conversationId) conversationTitle = title
+  await refreshConversations()
+}
+
+export function showHistoryView() {
+  view = 'history'
+  emit()
+  void refreshConversations()
+}
+
+/** 持久化当前会话（在用户消息与助手回复落定后调用）。 */
+async function persistCurrent() {
+  if (!state.apiKey) return
+  const meta = await saveConversation({ id: conversationId, title: conversationTitle, messages: state.messages })
+  if (meta) {
+    conversationTitle = meta.title
+    const idx = conversations.findIndex((m) => m.id === meta.id)
+    if (idx >= 0) conversations[idx] = meta
+    else conversations = [meta, ...conversations]
+    emit()
+  }
+}
+
+// ---------- 对话控制 ----------
 
 function cleanup() {
   state.thinking = false
@@ -201,8 +334,7 @@ function cleanup() {
   emit()
 }
 
-export function stopGeneration() {
-  stopRequested = true
+export function stopGeneration() {  stopRequested = true
   if (abortCtrl) {
     abortCtrl.abort()
     abortCtrl = null
@@ -254,6 +386,19 @@ export async function sendMessage(text: string): Promise<void> {
   }
 
   /**
+   * 生成过程中的节流落盘（每 2.5s 一次）：
+   * 停止/出错/关闭窗口时可能不会走到收尾分支（例如 abort 会让 streamTurn 抛出），
+   * 若只在收尾落盘，历史对话会整段丢失。此处在消息推进时定期持久化兜底。
+   */
+  let lastPersist = 0
+  function persistThrottled() {
+    const now = Date.now()
+    if (now - lastPersist < 2500) return
+    lastPersist = now
+    void persistCurrent()
+  }
+
+  /**
    * 把「上一个 HTML」和「新 HTML」的差异包进渐入标签。
    *
    * 不能用长度前缀切分：重建的 HTML 在标签中间长度会变（`**b` → `<strong>b`），
@@ -282,6 +427,7 @@ export async function sendMessage(text: string): Promise<void> {
   function onDelta(content: string) {
     fullContent = content
     ensureAiDiv()
+    persistThrottled()
     const now = Date.now()
     if (now - lastRender < 70) {
       // 节流窗口内先给纯文本，保证首字立刻可见（不等 Markdown 重排）
@@ -312,10 +458,11 @@ export async function sendMessage(text: string): Promise<void> {
     let msgs: ChatMessage[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...state.messages]
     let loops = 10
     let t0 = Date.now()
+    // 消息一入队就落盘一次：保证「有用户消息的会话」立刻出现在历史里
+    await persistCurrent()
     let turn = await streamTurn(msgs, signal, onDelta, streamCtx())
     finishThinking(thinkingId)
     if (stopRequested) {
-      cleanup()
       return
     }
 
@@ -365,7 +512,6 @@ export async function sendMessage(text: string): Promise<void> {
       turn = await streamTurn(msgs, signal, onDelta, streamCtx())
       finishThinking(tId)
       if (stopRequested) {
-        cleanup()
         return
       }
     }
@@ -374,7 +520,6 @@ export async function sendMessage(text: string): Promise<void> {
       finishThinking(thinkingId)
       ensureAiDiv()
       updateAiHtml(aiMsgId!, '抱歉，工具调用次数过多，请重试。', false)
-      cleanup()
       return
     }
 
@@ -391,8 +536,11 @@ export async function sendMessage(text: string): Promise<void> {
     } else {
       updateAiHtml(aiMsgId!, '出错了: ' + e.message, false)
     }
+  } finally {
+    // 无论正常结束、停止、还是出错，都保证当前会话落盘（历史不丢）
+    cleanup()
+    await persistCurrent()
   }
-  cleanup()
 }
 
 // ---------- 配置 ----------
@@ -519,7 +667,10 @@ export function init(): void {
         state.maxCtx = settings.maxCtx || 200
         state.showToolProcess = settings.showToolProcess !== false
         view = 'chat'
-        newChat()
+        // 注意：这里**不能**调用 newChat()——newChat 会生成新会话 id 并写回 cache，
+        // 把胶囊/其他界面正在使用的「当前会话」覆盖掉，「继续当前会话」就失效了。
+        // 会话的续接统一由各界面 bootstrap 调 ensureCurrentConversationId + openConversation 完成。
+        ui = [welcomeUi()]
       } else {
         view = 'config'
         ui = []

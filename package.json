@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build"
+    "build": "tsc --noEmit && vite build && node scripts/gen-overlay-inline.mjs && vite build && node scripts/copy-static.mjs",
+    "build:app": "tsc --noEmit && vite build"
   },
   "dependencies": {
     "@qomicex/plugin-ui": "^0.2.1",
