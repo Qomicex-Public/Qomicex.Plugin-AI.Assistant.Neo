@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchModels as engineFetchModels, testConnection, testModel, saveConfig } from '../chat/engine.ts'
-import type { ReasoningEffort, Modality } from '../chat/types.ts'
+import type { ReasoningEffort, Modality, FilePermission } from '../chat/types.ts'
 
 export interface ConfigValues {
   baseUrl: string
@@ -10,6 +10,7 @@ export interface ConfigValues {
   showToolProcess: boolean
   reasoningEffort: ReasoningEffort
   modalities: Modality[]
+  filePermission: FilePermission
 }
 
 interface ConfigFormProps {
@@ -39,6 +40,24 @@ const MODALITIES: { value: Modality; label: string }[] = [
   { value: 'video', label: '视频' },
 ]
 
+const FILE_PERMS: { value: FilePermission; label: string; hint: string }[] = [
+  {
+    value: 'readonly',
+    label: '只读',
+    hint: '只能 Read / Grep 查看，不能写入、执行命令或解压。查 wiki / 搜索模组等非文件操作不受影响。',
+  },
+  {
+    value: 'write',
+    label: '可写',
+    hint: 'Read / Write / Edit / Grep / Bash / Compress / Decompress 全部可用；首次访问某个目录时启动器会弹窗向你授权。',
+  },
+  {
+    value: 'full',
+    label: '完全访问',
+    hint: '与「可写」相同但不再弹授权窗，自动同意。请仅在信任当前任务时使用。',
+  },
+]
+
 export default function ConfigForm({
   initial,
   onSaved,
@@ -54,6 +73,7 @@ export default function ConfigForm({
   const [showToolProcess, setShowToolProcess] = useState(initial.showToolProcess !== false)
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(initial.reasoningEffort || 'off')
   const [modalities, setModalities] = useState<Modality[]>(initial.modalities?.length ? initial.modalities : ['text'])
+  const [filePermission, setFilePermission] = useState<FilePermission>(initial.filePermission || 'readonly')
   const [status, setStatus] = useState<{ text: string; color?: string }>({ text: '' })
   const [busy, setBusy] = useState(false)
 
@@ -71,6 +91,7 @@ export default function ConfigForm({
     setShowToolProcess(initial.showToolProcess !== false)
     setReasoningEffort(initial.reasoningEffort || 'off')
     setModalities(initial.modalities?.length ? initial.modalities : ['text'])
+    setFilePermission(initial.filePermission || 'readonly')
     // 只在外部 initial 真正变化时同步（对象由父级按值重建）
   }, [
     initial.baseUrl,
@@ -79,6 +100,7 @@ export default function ConfigForm({
     initial.maxCtx,
     initial.showToolProcess,
     initial.reasoningEffort,
+    initial.filePermission,
     /* 数组按内容比较，避免父级每次渲染都重置 */
     initial.modalities?.join(','),
   ])
@@ -165,6 +187,7 @@ export default function ConfigForm({
         showToolProcess,
         reasoningEffort,
         modalities: modes,
+        filePermission,
       },
       { settingsMode }
     )
@@ -238,6 +261,20 @@ export default function ConfigForm({
             </select>
           </div>
           <div className="field-hint">{EFFORTS.find((e) => e.value === reasoningEffort)?.hint}</div>
+        </div>
+
+        <div>
+          <label className="p-label">文件操作权限</label>
+          <div className="field-row">
+            <select className="p-input" value={filePermission} onChange={(e) => setFilePermission(e.target.value as FilePermission)}>
+              {FILE_PERMS.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field-hint">{FILE_PERMS.find((p) => p.value === filePermission)?.hint}</div>
         </div>
 
         <div>

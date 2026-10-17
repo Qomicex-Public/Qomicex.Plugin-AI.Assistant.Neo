@@ -1,4 +1,5 @@
 import type { PluginApi } from '../api.ts'
+import * as fileTools from './fileTools.ts'
 
 let api: PluginApi | null = null
 
@@ -599,18 +600,13 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
         return { url: url, error: '抓取失败（可能被拒绝访问或需要 JS 渲染）: ' + e.message }
       })
   },
-  readFile: (a) => {
-    const path = (a.path || '').trim()
-    if (!path) return { error: '请输入文件路径' }
-    return api!
-      .call('readText', path)
-      .then((file: any) => {
-        return file ? file.content : ''
-      })
-      .catch((e: any) => {
-        return { error: '读取失败: ' + (e && e.message || String(e)) }
-      })
-  },
+  Read: (a) => fileTools.toolRead(a),
+  Write: (a) => fileTools.toolWrite(a),
+  Edit: (a) => fileTools.toolEdit(a),
+  Grep: (a) => fileTools.toolGrep(a),
+  Bash: (a) => fileTools.toolBash(a),
+  Compress: (a) => fileTools.toolCompress(a),
+  Decompress: (a) => fileTools.toolDecompress(a),
   convertDocument: (a) => {
     const path = (a.path || '').trim()
     if (!path) return { error: '请输入文件路径' }
@@ -645,27 +641,6 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
         return { error: 'MarkItDown 转换失败: ' + msg }
       })
   },
-  writeFile: (a) => {
-    const path = (a.path || '').trim()
-    if (!path) return { error: '请输入文件路径' }
-    return api!.call('writeText', path, a.content === undefined ? '' : String(a.content)).catch((e: any) => {
-      return { error: '写入失败: ' + (e && e.message || String(e)) }
-    })
-  },
-  deleteFile: (a) => {
-    const path = (a.path || '').trim()
-    if (!path) return { error: '请输入文件路径' }
-    return api!.call('deleteFile', path).catch((e: any) => {
-      return { error: '删除失败: ' + e.message }
-    })
-  },
-  execCommand: (a) => {
-    const cmd = (a.command || '').trim()
-    if (!cmd) return { error: '请输入要执行的命令' }
-    return api!.call('execCommand', cmd, a.timeoutMs).catch((e: any) => {
-      return { error: '执行失败: ' + e.message }
-    })
-  },
   sleep: (a) => {
     const ms = Math.max(100, Math.min(parseInt(a.durationMs) || 1000, 600000))
     return new Promise((resolve) => {
@@ -694,6 +669,7 @@ export const toolNamesCN: Record<string, string> = {
   searchWiki: 'Wiki 搜索', getWikiContent: 'Wiki 内容',
   searchMcMod: 'MC百科搜索', getMcmodContent: 'MC百科内容',
   sendNotification: '发送通知', navigateTo: '导航', callBackendApi: '调用后端',
-  bingSearch: '网页搜索', fetchWeb: '抓取网页', readFile: '读取文件', convertDocument: '文档转换',
-  writeFile: '写入文件', deleteFile: '删除文件', execCommand: '执行命令', sleep: '延迟等待',
+  bingSearch: '网页搜索', fetchWeb: '抓取网页', Read: '读取文件', Write: '写入文件', Edit: '编辑文件',
+  Grep: '搜索内容', Bash: '执行命令', Compress: '压缩', Decompress: '解压', convertDocument: '文档转换',
+  sleep: '延迟等待',
 }

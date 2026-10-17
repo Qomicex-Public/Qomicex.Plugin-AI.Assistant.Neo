@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
-import type { UiMessage, MessagePart, ReasoningEffort } from './types.ts'
+import type { UiMessage, MessagePart, ReasoningEffort, FilePermission } from './types.ts'
 import { getApi } from '../api.ts'
 import {
   getSnapshot,
@@ -15,6 +15,7 @@ import {
   toggleToolEntry,
   toggleThinking,
   setSessionEffort,
+  setSessionPermission,
   refreshConversations,
   openConversation,
   removeConversation,
@@ -575,6 +576,18 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
             {snapshot.cfg.configured && (
               <select
                 className="effort-select"
+                title="文件操作权限（仅影响当前会话）"
+                value={snapshot.cfg.effectivePermission}
+                onChange={(e) => setSessionPermission(e.target.value as FilePermission)}
+              >
+                <option value="readonly">权限:只读</option>
+                <option value="write">可写</option>
+                <option value="full">完全访问</option>
+              </select>
+            )}
+            {snapshot.cfg.configured && (
+              <select
+                className="effort-select"
                 title="思考强度（仅影响当前会话）"
                 value={snapshot.cfg.effectiveEffort}
                 onChange={(e) => setSessionEffort(e.target.value as ReasoningEffort)}
@@ -700,6 +713,7 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                 showToolProcess: snapshot.cfg.showToolProcess,
                 reasoningEffort: snapshot.cfg.reasoningEffort,
                 modalities: snapshot.cfg.modalities,
+                filePermission: snapshot.cfg.filePermission,
               }}
               onSaved={showChatView}
               onBack={snapshot.cfg.configured ? showChatView : undefined}
