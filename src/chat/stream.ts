@@ -1,4 +1,4 @@
-import type { ChatMessage, ToolCall, ToolDef } from './types.ts'
+import type { ChatMessage, ToolCall, ToolDef, ReasoningEffort } from './types.ts'
 import { getApi } from '../api.ts'
 
 export interface StreamTurnCtx {
@@ -6,6 +6,8 @@ export interface StreamTurnCtx {
   baseUrl: string
   apiKey: string
   tools: ToolDef[]
+  /** 'off'（或未设置）时不发送 reasoning_effort 字段 */
+  reasoningEffort?: ReasoningEffort
 }
 
 export interface StreamResult {
@@ -17,14 +19,46 @@ export interface StreamResult {
 }
 
 /**
- * 从 delta 里取思考片段。
- * 不同 provider 字段名不一：DeepSeek 用 `reasoning_content`，
- * 部分 OpenAI 兼容端点用 `reasoning` / `thinking`，这里全部兼容。
+ * 从响应对象里取思考片段。
+ *
+ * 不同 provider 字段名与挂载位置都不一样，这里做宽口径兼容：
+ *   - 字段名：reasoning_content / reasoning / thinking / thinking_content
+ *   - 位置：delta（流式）/ message（非流式）/ 顶层（部分网关）
+ * 只接受非空字符串，避免把对象/数组误当内容。
  */
-function pickReasoning(delta: any): string {
-  if (!delta || typeof delta !== 'object') return ''
-  const v = delta.reasoning_content ?? delta.reasoning ?? delta.thinking
-  return typeof v === 'string' ? v : ''
+function pickReasoning(obj: any): string {
+  if (!obj || typeof obj !== 'object') return ''
+  for (const key of ['reasoning_content', 'reasoning', 'thinking', 'thinking_content']) {
+    const v = (obj as any)[key]
+    if (typeof v === 'string' && v) return v
+  }
+  return ''
+}
+
+/** 依次在 delta / message / 顶层中寻找思考片段。 */
+function pickReasoningDeep(node: any): string {
+  if (!node || typeof node !== 'object') return ''
+  return (
+    pickReasoning(node) ||
+    pickReasoning(node.delta) ||
+    pickReasoning(node.message) ||
+    (Array.isArray(node.choices) && node.choices[0] ? pickReasoning(node.choices[0]) || pickReasoning(node.choices[0].delta) || pickReasoning(node.choices[0].message) : '')
+  )
+}
+
+/**
+ * 组装请求体：思考强度仅在非 off 时下发。
+ * 注意 reasoning_effort 是 OpenAI 风格字段；部分提供商可能不识别，
+ * 那种情况由服务端返回错误，用户可在设置里关掉。
+ */
+export function buildPayload(model: string, messages: ChatMessage[], effort?: ReasoningEffort): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    model,
+    messages,
+    max_tokens: 4096,
+  }
+  if (effort && effort !== 'off') payload.reasoning_effort = effort
+  return payload
 }
 
 interface TurnPayload {
@@ -33,6 +67,7 @@ interface TurnPayload {
   max_tokens: number
   tools?: ToolDef[]
   tool_choice?: string
+  reasoning_effort?: ReasoningEffort
 }
 
 function streamTurnNonStream(
@@ -64,7 +99,7 @@ function streamTurnNonStream(
       const choice = data.choices && data.choices[0]
       if (!choice) return { finishReason: null, content: '', toolCalls: [] as ToolCall[], reasoning: '' }
       const content = (choice.message && choice.message.content) || ''
-      const reasoning = pickReasoning(choice.message)
+      const reasoning = pickReasoning(choice.message) || pickReasoningDeep(choice)
       if (onReasoning && reasoning) onReasoning(reasoning)
       if (onDelta && content) onDelta(content)
       return {
@@ -88,6 +123,7 @@ export function streamTurn(
     messages: messages,
     max_tokens: 4096,
   }
+  if (ctx.reasoningEffort && ctx.reasoningEffort !== 'off') payload.reasoning_effort = ctx.reasoningEffort
   if (ctx.model !== 'deepseek-reasoner') {
     payload.tools = ctx.tools
     payload.tool_choice = 'auto'
@@ -144,7 +180,7 @@ export function streamTurn(
                 const choice = json.choices && json.choices[0]
                 if (!choice) continue
                 const delta = choice.delta || {}
-                const rc = pickReasoning(delta)
+                const rc = pickReasoning(delta) || pickReasoningDeep(json) || pickReasoning(choice)
                 if (rc) {
                   reasoning += rc
                   if (onReasoning) onReasoning(reasoning)

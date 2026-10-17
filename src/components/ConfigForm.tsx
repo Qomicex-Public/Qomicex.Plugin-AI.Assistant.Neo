@@ -1,22 +1,87 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { fetchModels as engineFetchModels, testConnection, testModel, saveConfig } from '../chat/engine.ts'
+import type { ReasoningEffort, Modality } from '../chat/types.ts'
+
+export interface ConfigValues {
+  baseUrl: string
+  apiKey: string
+  model: string
+  maxCtx: number
+  showToolProcess: boolean
+  reasoningEffort: ReasoningEffort
+  modalities: Modality[]
+}
 
 interface ConfigFormProps {
-  initial: { baseUrl: string; apiKey: string; model: string; maxCtx: number; showToolProcess: boolean }
+  initial: ConfigValues
   onSaved?: () => void
   onBack?: () => void
   submitLabel?: string
+  /**
+   * 以「设置页」形态展示：只读写全局默认值，不触发聊天引擎的保存/跳转。
+   * 聊天内的设置视图用默认值（false）。
+   */
+  settingsMode?: boolean
 }
 
-export default function ConfigForm({ initial, onSaved, onBack, submitLabel = '保存并开始' }: ConfigFormProps) {
+const EFFORTS: { value: ReasoningEffort; label: string; hint: string }[] = [
+  { value: 'off', label: '关闭', hint: '不发送 reasoning_effort（兼容不支持思考的模型）' },
+  { value: 'minimal', label: '最低', hint: 'reasoning_effort=minimal' },
+  { value: 'low', label: '低', hint: 'reasoning_effort=low' },
+  { value: 'medium', label: '中', hint: 'reasoning_effort=medium' },
+  { value: 'high', label: '高', hint: 'reasoning_effort=high' },
+  { value: 'max', label: '最高', hint: 'reasoning_effort=max（部分提供商支持）' },
+]
+
+const MODALITIES: { value: Modality; label: string }[] = [
+  { value: 'text', label: '文本' },
+  { value: 'image', label: '图片' },
+  { value: 'video', label: '视频' },
+]
+
+export default function ConfigForm({
+  initial,
+  onSaved,
+  onBack,
+  submitLabel = '保存并开始',
+  settingsMode = false,
+}: ConfigFormProps) {
   const [baseUrl, setBaseUrl] = useState(initial.baseUrl || 'https://api.deepseek.com/v1')
   const [apiKey, setApiKey] = useState(initial.apiKey)
   const [model, setModel] = useState(initial.model || 'deepseek-chat')
   const [modelList, setModelList] = useState<string[]>([])
   const [maxCtx, setMaxCtx] = useState(initial.maxCtx || 200)
   const [showToolProcess, setShowToolProcess] = useState(initial.showToolProcess !== false)
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(initial.reasoningEffort || 'off')
+  const [modalities, setModalities] = useState<Modality[]>(initial.modalities?.length ? initial.modalities : ['text'])
   const [status, setStatus] = useState<{ text: string; color?: string }>({ text: '' })
   const [busy, setBusy] = useState(false)
+
+  /**
+   * 关键：initial 往往是异步拿到的（先渲染默认值，再 getSettings 回填）。
+   * useState 的初值只读一次，若不显式同步，表单会永远停在默认值上
+   * —— 这就是「设置里看不到已保存配置」的原因。
+   */
+  useEffect(() => {
+    if (!initial) return
+    setBaseUrl(initial.baseUrl || 'https://api.deepseek.com/v1')
+    setApiKey(initial.apiKey || '')
+    setModel(initial.model || 'deepseek-chat')
+    setMaxCtx(initial.maxCtx || 200)
+    setShowToolProcess(initial.showToolProcess !== false)
+    setReasoningEffort(initial.reasoningEffort || 'off')
+    setModalities(initial.modalities?.length ? initial.modalities : ['text'])
+    // 只在外部 initial 真正变化时同步（对象由父级按值重建）
+  }, [
+    initial.baseUrl,
+    initial.apiKey,
+    initial.model,
+    initial.maxCtx,
+    initial.showToolProcess,
+    initial.reasoningEffort,
+    /* 数组按内容比较，避免父级每次渲染都重置 */
+    initial.modalities?.join(','),
+  ])
 
   function show(msg: string, color?: string) {
     setStatus({ text: msg, color })
@@ -89,27 +154,50 @@ export default function ConfigForm({ initial, onSaved, onBack, submitLabel = '�
       show('请先获取模型列表并选择模型', 'hsl(var(--destructive))')
       return
     }
+    const modes = modalities.includes('text') ? modalities : [...modalities, 'text' as Modality]
     setBusy(true)
-    const r = await saveConfig({
-      apiKey: apiKey.trim(),
-      baseUrl: baseUrl.trim(),
-      model: model.trim(),
-      maxCtx,
-      showToolProcess,
-    })
+    const r = await saveConfig(
+      {
+        apiKey: apiKey.trim(),
+        baseUrl: baseUrl.trim(),
+        model: model.trim(),
+        maxCtx,
+        showToolProcess,
+        reasoningEffort,
+        modalities: modes,
+      },
+      { settingsMode }
+    )
     setBusy(false)
     if (r.ok) {
-      show('')
-      onSaved?.()
+      show(settingsMode ? '已保存' : '')
+      if (settingsMode) {
+        setTimeout(() => show(''), 2000)
+      } else {
+        onSaved?.()
+      }
     } else {
       show('保存失败: ' + (r.error || ''), 'hsl(var(--destructive))')
     }
   }
 
+  function toggleModality(m: Modality) {
+    setModalities((prev) => {
+      if (prev.includes(m)) {
+        // 文本始终保留：任何对话都需要文本
+        if (m === 'text') return prev
+        return prev.filter((x) => x !== m)
+      }
+      return [...prev, m]
+    })
+  }
+
   return (
     <div className="p-card">
       <div className="p-card-content" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <p style={{ margin: 0, color: 'hsl(var(--muted-foreground))', textAlign: 'center', fontSize: 13 }}>请配置 AI API</p>
+        {!settingsMode && (
+          <p style={{ margin: 0, color: 'hsl(var(--muted-foreground))', textAlign: 'center', fontSize: 13 }}>请配置 AI API</p>
+        )}
         <div>
           <label className="p-label">API 地址</label>
           <input type="url" className="p-input" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com/v1" />
@@ -137,6 +225,41 @@ export default function ConfigForm({ initial, onSaved, onBack, submitLabel = '�
             ))}
           </datalist>
         </div>
+
+        <div>
+          <label className="p-label">思考强度</label>
+          <div className="field-row">
+            <select className="p-input" value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort)}>
+              {EFFORTS.map((e) => (
+                <option key={e.value} value={e.value} title={e.hint}>
+                  {e.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field-hint">{EFFORTS.find((e) => e.value === reasoningEffort)?.hint}</div>
+        </div>
+
+        <div>
+          <label className="p-label">模型支持的模态</label>
+          <div className="modality-row">
+            {MODALITIES.map((m) => (
+              <label key={m.value} className={'modality-chip' + (modalities.includes(m.value) ? ' modality-chip--on' : '')}>
+                <input
+                  type="checkbox"
+                  checked={modalities.includes(m.value)}
+                  disabled={m.value === 'text'}
+                  onChange={() => toggleModality(m.value)}
+                />
+                {m.label}
+              </label>
+            ))}
+          </div>
+          <div className="field-hint">
+            决定聊天框可发送的内容类型。勾选图片/视频后，可在聊天框中附加对应文件；模型需实际支持，否则请求会报错。
+          </div>
+        </div>
+
         <div>
           <label className="p-label">
             最大上下文 <span style={{ color: 'hsl(var(--muted-foreground))', fontWeight: 400 }}>{maxCtx}k</span>

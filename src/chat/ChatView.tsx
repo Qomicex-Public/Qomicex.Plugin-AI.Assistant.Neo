@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
-import type { UiMessage } from './types.ts'
+import type { UiMessage, MessagePart, ReasoningEffort } from './types.ts'
 import { getApi } from '../api.ts'
 import {
   getSnapshot,
@@ -14,6 +14,7 @@ import {
   manualCompressCtx,
   toggleToolEntry,
   toggleThinking,
+  setSessionEffort,
   refreshConversations,
   openConversation,
   removeConversation,
@@ -42,7 +43,7 @@ function FlowingText({ text }: { text: string }) {
   )
 }
 
-type IconName = 'stop' | 'refresh' | 'settings' | 'chevron' | 'copy' | 'check' | 'history' | 'close' | 'trash' | 'send'
+type IconName = 'stop' | 'refresh' | 'settings' | 'chevron' | 'copy' | 'check' | 'history' | 'close' | 'trash' | 'send' | 'attach'
 function Icon({ name, size = 15 }: { name: IconName; size?: number }) {
   const p = {
     width: size,
@@ -113,6 +114,12 @@ function Icon({ name, size = 15 }: { name: IconName; size?: number }) {
       return (
         <svg {...p}>
           <path d="M5 12h14M13 6l6 6-6 6" />
+        </svg>
+      )
+    case 'attach':
+      return (
+        <svg {...p}>
+          <path d="M21.4 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
         </svg>
       )
     case 'check':
@@ -200,6 +207,9 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
   const [historyOpen, setHistoryOpen] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameText, setRenameText] = useState('')
+  /** 待发送的图片/视频附件（base64 data URL，仅本会话内存） */
+  const [pending, setPending] = useState<MessagePart[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const bootstrapped = useRef(false)
 
   useEffect(() => {
@@ -284,14 +294,41 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
 
   function doSend() {
     const text = input.trim()
-    if (!text) return
+    if (!text && pending.length === 0) return
     inputRef.current = ''
     setInput('')
-    if (text === '/compact') {
+    if (text === '/compact' && pending.length === 0) {
       manualCompressCtx()
       return
     }
-    void sendMessage(text)
+    const parts: MessagePart[] | undefined = pending.length
+      ? [{ type: 'text', text: text || '' }, ...pending]
+      : undefined
+    setPending([])
+    void sendMessage(text, parts)
+  }
+
+  /** 读取用户选择的图片/视频为 data URL（沙箱内 file 对象可用，不依赖文件系统权限）。 */
+  function onPickFiles(files: FileList | null) {
+    if (!files || files.length === 0) return
+    for (const f of Array.from(files)) {
+      const isImage = f.type.startsWith('image/')
+      const isVideo = f.type.startsWith('video/')
+      if (!isImage && !isVideo) continue
+      // 仅发送模型声明支持的模态，避免必然失败的请求
+      if (isImage && !snapshot.cfg.modalities.includes('image')) continue
+      if (isVideo && !snapshot.cfg.modalities.includes('video')) continue
+      const reader = new FileReader()
+      reader.onload = () => {
+        const url = String(reader.result || '')
+        if (!url) return
+        setPending((prev) => [
+          ...prev,
+          isImage ? { type: 'image_url', image_url: { url } } : { type: 'video_url', video_url: { url } },
+        ])
+      }
+      reader.readAsDataURL(f)
+    }
   }
 
   function doCopyAi(m: UiMessage) {
@@ -310,7 +347,20 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
       case 'user':
         return (
           <div key={m.id} className="msg-row msg-row--user">
-            <div className="msg-bubble msg-user">{m.content}</div>
+            <div className="msg-bubble msg-user">
+              {m.content}
+              {m.attachments && m.attachments.length > 0 && (
+                <div className="msg-attachments">
+                  {m.attachments.map((a, i) =>
+                    a.type === 'image_url' && a.image_url ? (
+                      <img key={i} className="msg-attach-img" src={a.image_url.url} alt="附件图片" />
+                    ) : a.type === 'video_url' && a.video_url ? (
+                      <video key={i} className="msg-attach-img" src={a.video_url.url} controls />
+                    ) : null
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )
       case 'ai':
@@ -522,6 +572,21 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                 {snapshot.ctxUsage.text}
               </button>
             )}
+            {snapshot.cfg.configured && (
+              <select
+                className="effort-select"
+                title="思考强度（仅影响当前会话）"
+                value={snapshot.cfg.effectiveEffort}
+                onChange={(e) => setSessionEffort(e.target.value as ReasoningEffort)}
+              >
+                <option value="off">思考:关</option>
+                <option value="minimal">最低</option>
+                <option value="low">低</option>
+                <option value="medium">中</option>
+                <option value="high">高</option>
+                <option value="max">最高</option>
+              </select>
+            )}
           </div>
           <div className="chat-head-actions">
             {snapshot.cfg.thinking && (
@@ -544,6 +609,32 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
               {snapshot.ui.map(renderMessage)}
             </div>
             <div className="chat-input-bar">
+              {(snapshot.cfg.modalities.includes('image') || snapshot.cfg.modalities.includes('video')) && (
+                <>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept={[
+                      snapshot.cfg.modalities.includes('image') ? 'image/*' : '',
+                      snapshot.cfg.modalities.includes('video') ? 'video/*' : '',
+                    ].filter(Boolean).join(',')}
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      onPickFiles(e.target.files)
+                      e.target.value = ''
+                    }}
+                  />
+                  <button
+                    className="icon-btn attach-btn"
+                    type="button"
+                    title="添加图片/视频"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <Icon name="attach" size={15} />
+                  </button>
+                </>
+              )}
               <textarea
                 ref={inputElRef}
                 className="chat-input"
@@ -561,10 +652,31 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                 }}
                 placeholder="输入消息，Enter 发送 · Shift+Enter 换行"
               />
-              <button className="send-btn" type="button" onClick={doSend} disabled={!input.trim()}>
+              <button className="send-btn" type="button" onClick={doSend} disabled={!input.trim() && pending.length === 0}>
                 发送
               </button>
             </div>
+            {pending.length > 0 && (
+              <div className="attach-strip">
+                {pending.map((p, i) => (
+                  <div key={i} className="attach-item">
+                    {p.type === 'image_url' && p.image_url ? (
+                      <img src={p.image_url.url} alt="" />
+                    ) : (
+                      <video src={p.video_url?.url} />
+                    )}
+                    <button
+                      className="attach-remove"
+                      type="button"
+                      title="移除"
+                      onClick={() => setPending((prev) => prev.filter((_, idx) => idx !== i))}
+                    >
+                      <Icon name="close" size={10} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="chat-hint">Enter 发送 · Shift+Enter 换行 · /compact 压缩上下文</div>
           </>
         ) : snapshot.view === 'history' ? (
@@ -586,6 +698,8 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                 model: snapshot.cfg.model,
                 maxCtx: snapshot.cfg.maxCtx,
                 showToolProcess: snapshot.cfg.showToolProcess,
+                reasoningEffort: snapshot.cfg.reasoningEffort,
+                modalities: snapshot.cfg.modalities,
               }}
               onSaved={showChatView}
               onBack={snapshot.cfg.configured ? showChatView : undefined}
