@@ -12,6 +12,19 @@ export interface StreamResult {
   finishReason: string | null
   content: string
   toolCalls: ToolCall[]
+  /** 模型思考过程（reasoner / reasoning 类模型返回；普通模型为空串） */
+  reasoning: string
+}
+
+/**
+ * 从 delta 里取思考片段。
+ * 不同 provider 字段名不一：DeepSeek 用 `reasoning_content`，
+ * 部分 OpenAI 兼容端点用 `reasoning` / `thinking`，这里全部兼容。
+ */
+function pickReasoning(delta: any): string {
+  if (!delta || typeof delta !== 'object') return ''
+  const v = delta.reasoning_content ?? delta.reasoning ?? delta.thinking
+  return typeof v === 'string' ? v : ''
 }
 
 interface TurnPayload {
@@ -25,7 +38,8 @@ interface TurnPayload {
 function streamTurnNonStream(
   payload: TurnPayload,
   onDelta: ((c: string) => void) | undefined,
-  ctx: StreamTurnCtx
+  ctx: StreamTurnCtx,
+  onReasoning?: (r: string) => void
 ): Promise<StreamResult> {
   const api = getApi()
   if (!api) return Promise.reject(new Error('API 桥接不可用'))
@@ -48,13 +62,16 @@ function streamTurnNonStream(
       }
       const data = JSON.parse(res.body)
       const choice = data.choices && data.choices[0]
-      if (!choice) return { finishReason: null, content: '', toolCalls: [] as ToolCall[] }
+      if (!choice) return { finishReason: null, content: '', toolCalls: [] as ToolCall[], reasoning: '' }
       const content = (choice.message && choice.message.content) || ''
+      const reasoning = pickReasoning(choice.message)
+      if (onReasoning && reasoning) onReasoning(reasoning)
       if (onDelta && content) onDelta(content)
       return {
         finishReason: choice.finish_reason || null,
         content: content,
         toolCalls: (choice.message && choice.message.tool_calls) || [],
+        reasoning: reasoning,
       }
     })
 }
@@ -63,7 +80,8 @@ export function streamTurn(
   messages: ChatMessage[],
   signal: AbortSignal | undefined,
   onDelta: (c: string) => void,
-  ctx: StreamTurnCtx
+  ctx: StreamTurnCtx,
+  onReasoning?: (r: string) => void
 ): Promise<StreamResult> {
   const payload: TurnPayload = {
     model: ctx.model,
@@ -80,13 +98,19 @@ export function streamTurn(
   if (api.proxyFetchStream) {
     return new Promise<StreamResult>((resolve, reject) => {
       let content = ''
+      let reasoning = ''
       const toolCalls: (ToolCall | undefined)[] = []
       let finishReason: string | null = null
       let settled = false
       function settle() {
         if (settled) return
         settled = true
-        resolve({ finishReason: finishReason, content: content, toolCalls: toolCalls.filter(Boolean) as ToolCall[] })
+        resolve({
+          finishReason: finishReason,
+          content: content,
+          toolCalls: toolCalls.filter(Boolean) as ToolCall[],
+          reasoning: reasoning,
+        })
       }
       api
         .proxyFetchStream(
@@ -120,6 +144,11 @@ export function streamTurn(
                 const choice = json.choices && json.choices[0]
                 if (!choice) continue
                 const delta = choice.delta || {}
+                const rc = pickReasoning(delta)
+                if (rc) {
+                  reasoning += rc
+                  if (onReasoning) onReasoning(reasoning)
+                }
                 if (delta.content) {
                   content += delta.content
                   if (onDelta) onDelta(content)
@@ -159,15 +188,15 @@ export function streamTurn(
     })
       .then((result) => {
         if (!result.content && !result.toolCalls.length && !result.finishReason) {
-          return streamTurnNonStream(payload, onDelta, ctx)
+          return streamTurnNonStream(payload, onDelta, ctx, onReasoning)
         }
         return result
       })
       .catch((e) => {
         if (e && e.name === 'AbortError') throw e
-        return streamTurnNonStream(payload, onDelta, ctx)
+        return streamTurnNonStream(payload, onDelta, ctx, onReasoning)
       })
   }
 
-  return streamTurnNonStream(payload, onDelta, ctx)
+  return streamTurnNonStream(payload, onDelta, ctx, onReasoning)
 }

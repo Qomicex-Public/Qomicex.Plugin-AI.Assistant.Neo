@@ -145,8 +145,14 @@ function addToolResult(detailId: number, resultText: string) {
   emit()
 }
 
-function toggleToolEntry(id: number) {
+export function toggleToolEntry(id: number) {
   ui = ui.map((m) => (m.id === id ? { ...m, collapsed: !m.collapsed } : m))
+  emit()
+}
+
+/** 展开/收起思考过程（与上下文压缩无关）。默认收起，首次点击展开。 */
+export function toggleThinking(id: number) {
+  ui = ui.map((m) => (m.id !== id || m.kind !== 'thinking' ? m : { ...m, collapsed: !m.collapsed }))
   emit()
 }
 
@@ -157,6 +163,13 @@ function finishThinking(id: number, doneText?: string) {
     const text = doneText || '已思考 ' + formatDuration(Date.now() - start)
     return { ...m, done: true, content: text }
   })
+  emit()
+}
+
+/** 把模型思考内容写进对应的思考条目（供点击展开）；没有内容就保持纯时长。 */
+function setThinkingDetail(id: number, reasoning: string) {
+  if (!reasoning) return
+  ui = ui.map((m) => (m.id === id && m.kind === 'thinking' ? { ...m, detail: reasoning } : m))
   emit()
 }
 
@@ -460,7 +473,7 @@ export async function sendMessage(text: string): Promise<void> {
     let t0 = Date.now()
     // 消息一入队就落盘一次：保证「有用户消息的会话」立刻出现在历史里
     await persistCurrent()
-    let turn = await streamTurn(msgs, signal, onDelta, streamCtx())
+    let turn = await streamTurn(msgs, signal, onDelta, streamCtx(), (r) => setThinkingDetail(thinkingId, r))
     finishThinking(thinkingId)
     if (stopRequested) {
       return
@@ -509,7 +522,7 @@ export async function sendMessage(text: string): Promise<void> {
       t0 = Date.now()
       msgs = [{ role: 'system', content: SYSTEM_PROMPT }, ...state.messages]
       const tId = pushUi({ kind: 'thinking', thinkingStart: Date.now() })
-      turn = await streamTurn(msgs, signal, onDelta, streamCtx())
+      turn = await streamTurn(msgs, signal, onDelta, streamCtx(), (r) => setThinkingDetail(tId, r))
       finishThinking(tId)
       if (stopRequested) {
         return
@@ -713,4 +726,4 @@ export function insertDroppedFiles(filePaths: string[]) {
   appendInput(paths.join(' '))
 }
 
-export { getSnapshot, subscribe, toggleToolEntry, state }
+export { getSnapshot, subscribe, state }

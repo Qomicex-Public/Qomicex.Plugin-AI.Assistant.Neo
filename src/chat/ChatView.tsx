@@ -13,6 +13,7 @@ import {
   showChatView,
   manualCompressCtx,
   toggleToolEntry,
+  toggleThinking,
   refreshConversations,
   openConversation,
   removeConversation,
@@ -315,7 +316,6 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
       case 'ai':
         return (
           <div key={m.id} className="msg-row msg-row--ai">
-            <div className="msg-avatar ai-avatar">AI</div>
             <div className="msg-col">
               <div className="msg-bubble msg-ai" data-msg-id={m.id}>
                 {m.html ? (
@@ -335,19 +335,34 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
             </div>
           </div>
         )
-      case 'thinking':
+      case 'thinking': {
+        // 「已思考」只负责展开思考过程；上下文压缩在顶部用量徽标上，两者不该混为一谈。
+        const hasDetail = !!(m.detail && m.detail.trim())
         return (
           <div key={m.id} className="msg-row msg-row--ai">
-            <div className="msg-avatar ai-avatar">AI</div>
-            <button className="thinking-chip" title="点击手动压缩上下文" onClick={manualCompressCtx}>
-              {m.done ? m.content : <FlowingText text="正在思考" />}
-            </button>
+            <div className="msg-col">
+              <button
+                className={'thinking-chip' + (hasDetail ? ' thinking-chip--expandable' : '')}
+                type="button"
+                title={hasDetail ? (m.collapsed === false ? '收起思考过程' : '展开思考过程') : '该模型未返回思考过程'}
+                disabled={!hasDetail}
+                onClick={() => hasDetail && toggleThinking(m.id)}
+              >
+                {hasDetail && (
+                  <span className={'tool-caret' + (m.collapsed === false ? ' tool-caret--open' : '')}>
+                    <Icon name="chevron" size={11} />
+                  </span>
+                )}
+                {m.done ? m.content : <FlowingText text="正在思考" />}
+              </button>
+              {hasDetail && m.collapsed === false && <div className="thinking-detail">{m.detail}</div>}
+            </div>
           </div>
         )
+      }
       case 'tool':
         return (
           <div key={m.id} className="msg-row msg-row--ai">
-            <div className="tool-spacer" />
             <div className="tool-card">
               <button className="tool-head" type="button" onClick={() => toggleToolEntry(m.id)}>
                 <span className={'tool-caret' + (m.collapsed ? '' : ' tool-caret--open')}>

@@ -39,6 +39,8 @@ export interface UiMessage {
   toolTimeMs?: number
   toolLines?: ToolEntryLine[]
   collapsed?: boolean
+  /** 思考条目的展开内容（模型思考过程）；为空时该条目不可展开 */
+  detail?: string
   /** 用于 AI 消息渲染时避免与工具块标记冲突 */
   rawText?: string
 }
