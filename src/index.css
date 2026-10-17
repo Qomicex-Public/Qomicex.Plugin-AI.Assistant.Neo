@@ -16,6 +16,27 @@ body {
   background: transparent;
 }
 
+/*
+ * 标题栏胶囊槽位（slots.html）专用：不要在根元素上保留深色 color-scheme。
+ *
+ * 原因（实机对比验证）：滚动容器/iframe 根画布的底色由 color-scheme 决定，而不是
+ * `background:transparent` —— 声明 color-scheme:dark 时画布会被填成不透明深色，
+ * 把启动器标题栏的半透明效果和壁纸整块挡住（实测 300px 宽纯黑块）。
+ * 胶囊只有图标和单行输入框，不需要深色原生控件，故这里回落浅色原生控件；
+ * 自绘颜色仍全部取 --foreground/--primary 等主题变量，视觉上依旧是深色。
+ *
+ * 注意选择器强度：启动器会注入 `:root{color-scheme:dark}`（0,1,0）。
+ * 这里用 `html[data-surface='slots']:root`（0,2,1）并加 !important，
+ * 确保不受注入顺序影响。
+ */
+html[data-surface='slots']:root {
+  color-scheme: light !important;
+}
+html[data-surface='slots'],
+html[data-surface='slots'] body {
+  background: transparent !important;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
