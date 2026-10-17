@@ -22,9 +22,14 @@ export interface ChatConfig {
   reasoningEffort: ReasoningEffort
   /** 该模型支持的输入模态（决定聊天框能否附加图片/视频） */
   modalities: Modality[]
+  /** 文件操作权限（全局默认） */
+  filePermission: FilePermission
 }
 
 export type UiMsgKind = 'user' | 'ai' | 'thinking' | 'tool' | 'progress'
+
+/** 文件操作权限：只读 / 可写 / 完全访问 */
+export type FilePermission = 'readonly' | 'write' | 'full'
 
 /** 思考强度：off 时不发送 reasoning_effort 字段 */
 export type ReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'max'
