@@ -1,36 +1,49 @@
 import { useEffect, useState } from 'react'
 import { getApi } from './api.ts'
-import ConfigForm from './components/ConfigForm.tsx'
+import ConfigForm, { type ConfigValues } from './components/ConfigForm.tsx'
+import type { ReasoningEffort, Modality } from './chat/types.ts'
+
+const DEFAULTS: ConfigValues = {
+  baseUrl: 'https://api.deepseek.com/v1',
+  apiKey: '',
+  model: 'deepseek-chat',
+  maxCtx: 200,
+  showToolProcess: true,
+  reasoningEffort: 'off',
+  modalities: ['text'],
+}
 
 export default function SettingsApp() {
-  const [initial, setInitial] = useState({
-    baseUrl: 'https://api.deepseek.com/v1',
-    apiKey: '',
-    model: 'deepseek-chat',
-    maxCtx: 200,
-    showToolProcess: true,
-  })
+  // null = 尚未读到配置，用于避免「先渲染默认值再回填」造成的一闪与误判
+  const [initial, setInitial] = useState<ConfigValues | null>(null)
   const [md, setMd] = useState({ baseUrl: 'https://api.deepseek.com/v1', apiKey: '', visionModel: 'gpt-4o-mini', audioModel: 'gpt-4o-audio-preview' })
   const [mdStatus, setMdStatus] = useState<{ text: string; color?: string }>({ text: '' })
-  // MarkItDown 可用性：未激活时明确提示，而不是静默失败
   const [mdReady, setMdReady] = useState<boolean | null>(null)
 
   useEffect(() => {
     const api = getApi()
-    if (!api || !api.call) return
+    if (!api || !api.call) {
+      setInitial(DEFAULTS)
+      return
+    }
     api
       .call('getSettings')
       .then((s: any) => {
         const settings = s || {}
         setInitial({
-          baseUrl: settings.baseUrl || 'https://api.deepseek.com/v1',
+          baseUrl: settings.baseUrl || DEFAULTS.baseUrl,
           apiKey: settings.deepseekApiKey || '',
-          model: settings.deepseekModel || 'deepseek-chat',
-          maxCtx: settings.maxCtx || 200,
+          model: settings.deepseekModel || DEFAULTS.model,
+          maxCtx: typeof settings.maxCtx === 'number' ? settings.maxCtx : DEFAULTS.maxCtx,
           showToolProcess: settings.showToolProcess !== false,
+          reasoningEffort: (settings.reasoningEffort as ReasoningEffort) || 'off',
+          modalities: Array.isArray(settings.modalities) && settings.modalities.length
+            ? (settings.modalities as Modality[])
+            : ['text'],
         })
       })
-      .catch(() => {})
+      .catch(() => setInitial(DEFAULTS))
+
     api
       .call('callPlugin', 'top.qomicex.markitdown', 'getConfig')
       .then((c: any) => {
@@ -71,17 +84,23 @@ export default function SettingsApp() {
       setMdStatusText('MarkItDown 配置已保存', 'hsl(var(--primary))')
       setTimeout(() => setMdStatusText(''), 2500)
     } catch (e: any) {
-      setMdStatusText('保存失败（MarkItDown 插件未安装?）: ' + (e.message || e), 'hsl(var(--destructive))')
+      setMdStatusText('保存失败（MarkItDown 插件未安装或未激活）: ' + (e.message || e), 'hsl(var(--destructive))')
     }
   }
 
   return (
     <div style={{ fontFamily: 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Microsoft YaHei", "PingFang SC", sans-serif', background: 'hsl(var(--background))', color: 'hsl(var(--foreground))' }}>
-      <div style={{ padding: 24, maxWidth: 480, margin: '0 auto' }}>
+      <div style={{ padding: 24, maxWidth: 520, margin: '0 auto' }}>
         <h1 style={{ fontSize: 18, fontWeight: 700, margin: '0 0 4px' }}>AI 助手</h1>
         <p style={{ fontSize: 13, color: 'hsl(var(--muted-foreground))', margin: '0 0 20px' }}>配置 AI API，开启智能助手功能</p>
 
-        <ConfigForm initial={initial} submitLabel="保存配置" />
+        {initial ? (
+          <ConfigForm initial={initial} submitLabel="保存配置" settingsMode />
+        ) : (
+          <div className="p-card">
+            <div className="p-card-content" style={{ fontSize: 13, color: 'hsl(var(--muted-foreground))' }}>正在读取已保存配置…</div>
+          </div>
+        )}
 
         <div className="p-card" style={{ marginTop: 14 }}>
           <div className="p-card-content" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -125,8 +144,8 @@ export default function SettingsApp() {
             <div style={{ fontWeight: 600, color: 'hsl(var(--foreground))', marginBottom: 6 }}>使用说明</div>
             <div>1. 填写 API 地址（默认 Deepseek）和 API Key</div>
             <div>2. 点击「获取模型」拉取可用模型列表（失败时可手动输入模型名）</div>
-            <div>3. 选择模型后保存</div>
-            <div>4. 点击侧边栏 AI 助手图标打开聊天窗口</div>
+            <div>3. 选择模型、思考强度与支持的模态后保存</div>
+            <div>4. 点击侧边栏 AI 助手图标打开 agent 页面</div>
             <div style={{ marginTop: 6, fontSize: 11 }}>兼容 OpenAI 协议的 API 均可使用（Deepseek / OpenAI / 通义千问 / Groq / 硅基流动等）</div>
           </div>
         </div>

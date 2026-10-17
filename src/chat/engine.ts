@@ -1,4 +1,4 @@
-import type { ChatMessage, UiMessage, ToolEntryLine } from './types.ts'
+import type { ChatMessage, UiMessage, ToolEntryLine, ReasoningEffort, Modality, MessagePart } from './types.ts'
 import { getApi } from '../api.ts'
 import { SYSTEM_PROMPT } from './systemPrompt.ts'
 import { toolDefs } from './toolDefs.ts'
@@ -28,6 +28,12 @@ export interface EngineSnapshot {
     model: string
     maxCtx: number
     showToolProcess: boolean
+    /** 全局默认思考强度 */
+    reasoningEffort: ReasoningEffort
+    /** 当前生效的思考强度（会话覆盖优先） */
+    effectiveEffort: ReasoningEffort
+    /** 该模型支持的模态 */
+    modalities: Modality[]
     configured: boolean
     thinking: boolean
   }
@@ -49,6 +55,10 @@ const state = {
   model: 'deepseek-chat',
   maxCtx: 200,
   showToolProcess: true,
+  reasoningEffort: 'off' as ReasoningEffort,
+  modalities: ['text'] as Modality[],
+  /** 会话级思考强度覆盖；null = 跟随全局默认 */
+  effortOverride: null as ReasoningEffort | null,
   thinking: false,
   messages: [] as ChatMessage[],
 }
@@ -76,6 +86,9 @@ function buildSnapshot(): EngineSnapshot {
       model: state.model,
       maxCtx: state.maxCtx,
       showToolProcess: state.showToolProcess,
+      reasoningEffort: state.reasoningEffort,
+      effectiveEffort: state.effortOverride ?? state.reasoningEffort,
+      modalities: state.modalities,
       configured: !!state.apiKey,
       thinking: state.thinking,
     },
@@ -161,7 +174,8 @@ function finishThinking(id: number, doneText?: string) {
     if (m.id !== id || m.kind !== 'thinking' || m.done) return m
     const start = m.thinkingStart || Date.now()
     const text = doneText || '已思考 ' + formatDuration(Date.now() - start)
-    return { ...m, done: true, content: text }
+    // 思考结束即收起（用户可再点开查看过程）
+    return { ...m, done: true, content: text, collapsed: true }
   })
   emit()
 }
@@ -169,7 +183,11 @@ function finishThinking(id: number, doneText?: string) {
 /** 把模型思考内容写进对应的思考条目（供点击展开）；没有内容就保持纯时长。 */
 function setThinkingDetail(id: number, reasoning: string) {
   if (!reasoning) return
-  ui = ui.map((m) => (m.id === id && m.kind === 'thinking' ? { ...m, detail: reasoning } : m))
+  ui = ui.map((m) => {
+    if (m.id !== id || m.kind !== 'thinking') return m
+    // 思考进行中自动展开，便于实时看到过程（结束后由 finishThinking 收起）
+    return { ...m, detail: reasoning, collapsed: m.done ? m.collapsed : false }
+  })
   emit()
 }
 
@@ -363,16 +381,26 @@ function streamCtx(): StreamTurnCtx {
     baseUrl: state.baseUrl,
     apiKey: state.apiKey,
     tools: toolDefs,
+    // 会话覆盖优先，其次全局默认；'off' 时 stream 层不会发送 reasoning_effort
+    reasoningEffort: state.effortOverride ?? state.reasoningEffort,
   }
 }
 
-export async function sendMessage(text: string): Promise<void> {
+/** 会话内切换思考强度（只影响当前会话，不改全局设置）。 */
+export function setSessionEffort(effort: ReasoningEffort | null) {
+  state.effortOverride = effort
+  emit()
+}
+
+export async function sendMessage(text: string, parts?: MessagePart[]): Promise<void> {
   if (state.thinking) return
   state.thinking = true
   emit()
 
-  pushUi({ kind: 'user', content: text })
-  state.messages.push({ role: 'user', content: text })
+  const hasParts = Array.isArray(parts) && parts.length > 0
+  pushUi({ kind: 'user', content: text, attachments: hasParts ? parts.filter((p) => p.type !== 'text') : undefined })
+  // 有附件时用 content parts（文本 + 图片/视频）；否则保持纯字符串，兼容性最好
+  state.messages.push({ role: 'user', content: hasParts ? parts! : text })
   await compressContext(false, compressDeps)
   updateCtxDisplay()
 
@@ -629,13 +657,34 @@ export function testModel(key: string, baseUrl: string, model: string): Promise<
     .catch((e) => ({ ok: false, error: e.message }))
 }
 
-export function saveConfig(cfg: { apiKey: string; baseUrl: string; model: string; maxCtx: number; showToolProcess: boolean }): Promise<{ ok: boolean; error?: string }> {
+export function saveConfig(
+  cfg: {
+    apiKey: string
+    baseUrl: string
+    model: string
+    maxCtx: number
+    showToolProcess: boolean
+    reasoningEffort?: ReasoningEffort
+    modalities?: Modality[]
+  },
+  opts: {
+    /**
+     * settingsMode：由「设置 → 插件 → 插件设置」调用。设置页是独立 iframe，
+     * 不该影响聊天运行时（重置会话/切换视图），只负责把配置写盘。
+     */
+    settingsMode?: boolean
+  } = {}
+): Promise<{ ok: boolean; error?: string }> {
   state.apiKey = cfg.apiKey
   state.baseUrl = (cfg.baseUrl || 'https://api.deepseek.com/v1').replace(/\/+$/, '')
   state.model = cfg.model
   state.maxCtx = cfg.maxCtx || 200
   state.showToolProcess = cfg.showToolProcess !== false
-  newChat()
+  if (cfg.reasoningEffort !== undefined) state.reasoningEffort = cfg.reasoningEffort
+  if (cfg.modalities) state.modalities = cfg.modalities.length ? cfg.modalities : ['text']
+  // 全局默认变化后，会话级覆盖失效
+  state.effortOverride = null
+  if (!opts.settingsMode) newChat()
   const api = getApi()
   if (!api || !api.call) return Promise.resolve({ ok: false, error: 'API 桥接不可用' })
   return api
@@ -644,8 +693,10 @@ export function saveConfig(cfg: { apiKey: string; baseUrl: string; model: string
     .then(() => api.call('setSettings', 'baseUrl', state.baseUrl))
     .then(() => api.call('setSettings', 'maxCtx', state.maxCtx))
     .then(() => api.call('setSettings', 'showToolProcess', state.showToolProcess))
+    .then(() => api.call('setSettings', 'reasoningEffort', state.reasoningEffort))
+    .then(() => api.call('setSettings', 'modalities', state.modalities))
     .then(() => {
-      showChatView()
+      if (!opts.settingsMode) showChatView()
       return { ok: true }
     })
     .catch((e) => ({ ok: false, error: e.message || String(e) }))
@@ -679,6 +730,10 @@ export function init(): void {
         state.model = settings.deepseekModel || 'deepseek-chat'
         state.maxCtx = settings.maxCtx || 200
         state.showToolProcess = settings.showToolProcess !== false
+        state.reasoningEffort = (settings.reasoningEffort as ReasoningEffort) || 'off'
+        state.modalities = Array.isArray(settings.modalities) && settings.modalities.length
+          ? (settings.modalities as Modality[])
+          : ['text']
         view = 'chat'
         // 注意：这里**不能**调用 newChat()——newChat 会生成新会话 id 并写回 cache，
         // 把胶囊/其他界面正在使用的「当前会话」覆盖掉，「继续当前会话」就失效了。

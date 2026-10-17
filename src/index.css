@@ -571,6 +571,129 @@ html[data-surface='slots'] body {
   user-select: none;
 }
 
+/* 会话内思考强度切换 */
+.effort-select {
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  outline: none;
+}
+.effort-select:hover {
+  color: hsl(var(--foreground));
+  border-color: hsl(var(--primary) / 0.5);
+}
+
+/* 附件按钮与待发送预览 */
+.attach-btn {
+  flex-shrink: 0;
+  align-self: flex-end;
+  margin-bottom: 1px;
+}
+.attach-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 12px 6px;
+  flex-shrink: 0;
+}
+.attach-item {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted));
+}
+.attach-item img,
+.attach-item video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attach-remove {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 999px;
+  background: hsl(0 0% 0% / 0.62);
+  color: #fff;
+  cursor: pointer;
+  padding: 0;
+}
+.attach-remove:hover {
+  background: hsl(var(--destructive));
+}
+
+/* 已发送消息里的附件 */
+.msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.msg-attach-img {
+  max-width: 168px;
+  max-height: 168px;
+  border-radius: 6px;
+  border: 1px solid hsl(var(--primary-foreground) / 0.28);
+  object-fit: cover;
+  display: block;
+}
+
+/* 设置表单里的模态选择 */
+.modality-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.modality-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 999px;
+  background: hsl(var(--muted) / 0.6);
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s;
+}
+.modality-chip input {
+  margin: 0;
+  cursor: pointer;
+}
+.modality-chip--on {
+  border-color: hsl(var(--primary) / 0.6);
+  background: hsl(var(--primary) / 0.14);
+  color: hsl(var(--foreground));
+}
+.modality-chip:has(input:disabled) {
+  opacity: 0.75;
+  cursor: default;
+}
+.field-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: hsl(var(--muted-foreground));
+}
+
 .chat-config {
   flex: 1;
   min-height: 0;
