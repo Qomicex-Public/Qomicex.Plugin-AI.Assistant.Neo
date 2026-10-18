@@ -496,6 +496,19 @@ html[data-surface='slots'] body {
   border-top: 1px solid hsl(var(--border) / 0.6);
 }
 
+/* 工具卡片内联的界面截图（UiScreenshot） */
+.tool-shot {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  margin: 6px 0 2px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  cursor: zoom-in;
+  object-fit: contain;
+  background: hsl(var(--muted) / 0.3);
+}
+
 .progress-line {
   align-self: flex-start;
   padding: 1px 4px 1px 34px;

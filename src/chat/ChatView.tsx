@@ -441,6 +441,16 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                       </div>
                     ) : null
                   )}
+                  {m.image ? (
+                    // 界面截图：直接内联预览，点击可看原图（新窗口打开 data URL）
+                    <img
+                      className="tool-shot"
+                      src={m.image}
+                      alt="界面截图"
+                      title="点击查看原图"
+                      onClick={() => window.open(m.image, '_blank')}
+                    />
+                  ) : null}
                 </div>
               )}
             </div>
@@ -721,6 +731,7 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                 modalities: snapshot.cfg.modalities,
                 filePermission: snapshot.cfg.filePermission,
                 maxTokens: snapshot.cfg.maxTokens,
+                uiControl: snapshot.cfg.uiControl,
               }}
               onSaved={showChatView}
               onBack={snapshot.cfg.configured ? showChatView : undefined}

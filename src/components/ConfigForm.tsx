@@ -13,6 +13,8 @@ export interface ConfigValues {
   filePermission: FilePermission
   /** 单次回复输出上限（思考与正文共享） */
   maxTokens: number
+  /** 「启动器操作」（UI 自动化）总开关，与文件权限独立 */
+  uiControl: boolean
 }
 
 interface ConfigFormProps {
@@ -77,6 +79,7 @@ export default function ConfigForm({
   const [modalities, setModalities] = useState<Modality[]>(initial.modalities?.length ? initial.modalities : ['text'])
   const [filePermission, setFilePermission] = useState<FilePermission>(initial.filePermission || 'readonly')
   const [maxTokens, setMaxTokens] = useState<number>(initial.maxTokens || 8192)
+  const [uiControl, setUiControl] = useState<boolean>(initial.uiControl === true)
   const [status, setStatus] = useState<{ text: string; color?: string }>({ text: '' })
   const [busy, setBusy] = useState(false)
 
@@ -96,6 +99,7 @@ export default function ConfigForm({
     setModalities(initial.modalities?.length ? initial.modalities : ['text'])
     setFilePermission(initial.filePermission || 'readonly')
     setMaxTokens(initial.maxTokens || 8192)
+    setUiControl(initial.uiControl === true)
     // 只在外部 initial 真正变化时同步（对象由父级按值重建）
   }, [
     initial.baseUrl,
@@ -106,6 +110,7 @@ export default function ConfigForm({
     initial.reasoningEffort,
     initial.filePermission,
     initial.maxTokens,
+    initial.uiControl,
     /* 数组按内容比较，避免父级每次渲染都重置 */
     initial.modalities?.join(','),
   ])
@@ -194,6 +199,7 @@ export default function ConfigForm({
         modalities: modes,
         filePermission,
         maxTokens,
+        uiControl,
       },
       { settingsMode }
     )
@@ -329,6 +335,21 @@ export default function ConfigForm({
           <input type="checkbox" checked={showToolProcess} onChange={(e) => setShowToolProcess(e.target.checked)} />
           <span>显示工具调用过程</span>
         </label>
+
+        <div>
+          <label className="p-check-field" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input type="checkbox" checked={uiControl} onChange={(e) => setUiControl(e.target.checked)} />
+            <span>允许操作启动器界面</span>
+          </label>
+          <div className="field-hint">
+            开启后 AI 可以读取启动器界面元素，并用<b>真实鼠标</b>点击、输入（你能看到鼠标移动过去的过程）。
+            用途：某些功能只有界面没有插件 API 时，AI 仍能帮你完成。
+            风险更高：AI 会真的点击界面，删除/卸载这类不可逆动作需你当场确认（提示词约束，不是弹窗拦截）。
+            只影响界面操作，与上面的文件权限相互独立。仅 Windows 可用。
+            {!modalities.includes('image') && '（未勾选图片模态时不会提供截图工具）'}
+          </div>
+        </div>
+
         <button className="p-btn p-btn--primary" style={{ width: '100%' }} onClick={doSave} disabled={busy}>
           {submitLabel}
         </button>

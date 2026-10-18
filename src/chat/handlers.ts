@@ -1,5 +1,7 @@
 import type { PluginApi } from '../api.ts'
 import * as fileTools from './fileTools.ts'
+import { isUiControlEnabled } from './uiControl.ts'
+import { runAgent, readShotDataUrl, type AgentResult } from './uiAgent.ts'
 
 let api: PluginApi | null = null
 
@@ -225,6 +227,62 @@ function htmlToText(html: string) {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+// ---------- 启动器操作（UI 自动化）----------
+
+/**
+ * 工具结果里给模型看的正文预算（字符）。
+ *
+ * 引擎对工具结果统一有 4000 字符上限，界面快照这类结果必须自己排版并按预算裁剪，
+ * 否则会被从中间截断 —— 截到一半的元素行连 ref 都不完整，模型只能瞎猜。
+ * 留 400 字符余量给头尾说明。
+ */
+const UI_TEXT_BUDGET = 3600
+
+function uiGate(): { error: string } | null {
+  if (isUiControlEnabled()) return null
+  return {
+    error:
+      '「启动器操作」开关未开启，不能操作启动器界面。' +
+      '请让用户在插件设置里打开「允许操作启动器界面」（聊天里的设置视图或启动器的插件设置页均可）后重试。',
+  }
+}
+
+function clampInt(v: unknown, fallback: number, min: number, max: number): number {
+  const n = Math.floor(Number(v))
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, n))
+}
+
+function short(s: unknown, n: number): string {
+  const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim()
+  return t.length > n ? t.slice(0, n - 1) + '…' : t
+}
+
+/** 驱动失败 → 模型看得懂的错误（界面类结果一律带 __ui_text，引擎会原样转发）。 */
+function uiFail(r: AgentResult): { error: string; __ui_text: string } {
+  const code = r.code || 'E_UNKNOWN'
+  const hint =
+    code === 'E_STALE_REF'
+      ? '（ref 已失效：界面变了。请重新 UiSnapshot 拿新 ref，不要复用旧 ref）'
+      : code === 'E_NO_WINDOW'
+        ? '（没找到启动器窗口，请确认启动器正在运行）'
+        : code === 'E_NO_ROOT'
+          ? '（无法定位启动器网页内容；可先 UiFocus 激活窗口再重试）'
+          : ''
+  const msg = `${r.error || '界面操作失败'}${hint}`
+  return { error: msg, __ui_text: `ERROR[${code}] ${msg}` }
+}
+
+/** 快照的一行元素：ref 类型 "名称" @x,y wxh [可用动作] */
+function fmtElement(el: any): string {
+  const r = Array.isArray(el?.rect) ? el.rect : []
+  const rect = r.length >= 4 ? `${r[0]},${r[1]} ${r[2]}x${r[3]}` : '?'
+  const acts = Array.isArray(el?.actions) && el.actions.length ? ` [${el.actions.join(',')}]` : ''
+  const val = el?.value ? ` value="${short(el.value, 28)}"` : ''
+  const off = el?.enabled === false ? ' (已禁用)' : ''
+  return `${el?.ref}\t${el?.type} "${short(el?.name, 44)}"${off}${val} @${rect}${acts}`
 }
 
 // ---------- 工具处理器 ----------
@@ -673,6 +731,166 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
       setTimeout(() => resolve({ sleptMs: ms }), ms)
     })
   },
+
+  // ---------- 启动器操作（6 个）----------
+  // 结果里的 __ui_summary / __ui_text / __ui_image 是给引擎看的约定字段：
+  //   __ui_summary → 工具卡片上的一行摘要
+  //   __ui_text    → 发给模型的正文（本模块已按 UI_TEXT_BUDGET 排好版）
+  //   __ui_image   → 截图 data URL，由引擎摘出来单独作为图片消息发送
+
+  UiSnapshot: async (a) => {
+    const deny = uiGate()
+    if (deny) return deny
+    const r = await runAgent('snapshot', {
+      interactiveOnly: a.interactiveOnly !== false,
+      max: clampInt(a.max, 60, 1, 200),
+      offset: clampInt(a.offset, 0, 0, 1000000),
+      keyword: typeof a.keyword === 'string' ? a.keyword : '',
+    })
+    if (r.ok === false) return uiFail(r)
+    const els: any[] = Array.isArray(r.elements) ? r.elements : []
+    const lines: string[] = []
+    let used = 0
+    for (const el of els) {
+      const line = fmtElement(el)
+      if (used + line.length + 1 > UI_TEXT_BUDGET) break
+      lines.push(line)
+      used += line.length + 1
+    }
+    const start = Number(r.offset) || 0
+    const total = Number(r.total) || 0
+    const nextOffset = start + lines.length
+    const more = nextOffset < total
+    const head =
+      `启动器窗口「${r.window?.title ?? '?'}」共 ${total} 个可交互元素，本次给出第 ${start}~${nextOffset - 1} 个。\n` +
+      '每行格式：ref  类型 "名称" @x,y 宽x高 [可用动作]\n'
+    const tail = more
+      ? `\n…还有 ${total - nextOffset} 个未给出；需要时再 UiSnapshot(offset=${nextOffset}${a.keyword ? `, keyword="${a.keyword}"` : ''})`
+      : ''
+    return {
+      ok: true,
+      total,
+      offset: start,
+      shown: lines.length,
+      nextOffset: more ? nextOffset : null,
+      __ui_summary: `界面快照：${total} 个元素，给出 ${lines.length} 条`,
+      __ui_text: head + lines.join('\n') + tail,
+    }
+  },
+
+  UiClick: async (a) => {
+    const deny = uiGate()
+    if (deny) return deny
+    const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
+    const hasXY = a.x !== undefined && a.y !== undefined && Number.isFinite(Number(a.x)) && Number.isFinite(Number(a.y))
+    if (!ref && !hasXY) return { error: '需要 ref（来自 UiSnapshot）或 x/y 屏幕坐标' }
+    const r = await runAgent('click', {
+      ref: ref || undefined,
+      x: hasXY ? Math.round(Number(a.x)) : undefined,
+      y: hasXY ? Math.round(Number(a.y)) : undefined,
+      mode: a.mode === 'invoke' ? 'invoke' : 'mouse',
+      moveMs: clampInt(a.moveMs, 420, 0, 5000),
+    })
+    if (r.ok === false) return uiFail(r)
+    const d = r.diff || {}
+    const appeared =
+      Array.isArray(d.appeared) && d.appeared.length
+        ? `；新出现：${d.appeared.map((s: string) => short(s, 22)).join(' | ')}`
+        : ''
+    const t = r.target
+    const what = t ? `${t.type} "${short(t.name, 40)}"` : `坐标 ${(r.point || []).join(',')}`
+    return {
+      ok: true,
+      method: r.method,
+      point: r.point,
+      foreground: r.foreground,
+      diff: r.diff,
+      __ui_summary: `已点击 ${what}`,
+      __ui_text:
+        `已点击 ${what}（方式 ${r.method}${r.foreground === false ? '；注意：窗口未在前台，操作可能未生效' : ''}）。` +
+        `界面变化：新增 ${d.addedCount ?? 0} / 消失 ${d.removedCount ?? 0}${appeared}`,
+    }
+  },
+
+  UiType: async (a) => {
+    const deny = uiGate()
+    if (deny) return deny
+    const text = a.text === undefined || a.text === null ? '' : String(a.text)
+    if (!text) return { error: 'text 必填' }
+    const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
+    const r = await runAgent('type', {
+      text,
+      ref: ref || undefined,
+      clear: a.clear !== false,
+      moveMs: clampInt(a.moveMs, 360, 0, 5000),
+    })
+    if (r.ok === false) return uiFail(r)
+    const target = r.target ? `${r.target.type} "${short(r.target.name, 40)}"` : '当前焦点控件'
+    return {
+      ok: true,
+      method: r.method,
+      valueAfter: r.valueAfter,
+      __ui_summary: `已输入 ${r.typed ?? text.length} 个字符`,
+      __ui_text:
+        `已向 ${target} 输入 ${r.typed ?? text.length} 个字符（方式 ${r.method}）。` +
+        (r.valueAfter !== undefined ? `输入后该控件值为 "${short(r.valueAfter, 60)}"。` : '') +
+        (r.pasteError ? `注意：剪贴板粘贴失败（${short(r.pasteError, 80)}），已降级为直接赋值，部分控件可能不接受。` : ''),
+    }
+  },
+
+  UiKeys: async (a) => {
+    const deny = uiGate()
+    if (deny) return deny
+    const keys = a.keys === undefined || a.keys === null ? '' : String(a.keys)
+    if (!keys) return { error: 'keys 必填，例如 "{ENTER}"、"{TAB}"、"^s"' }
+    const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
+    const r = await runAgent('keys', { keys, ref: ref || undefined, moveMs: clampInt(a.moveMs, 320, 0, 5000) })
+    if (r.ok === false) return uiFail(r)
+    return {
+      ok: true,
+      sent: r.sent,
+      __ui_summary: `已发送按键 ${keys}`,
+      __ui_text: `已向启动器发送按键 ${r.sent ?? keys}。如需确认效果，请再用 UiSnapshot 或 UiScreenshot 复查。`,
+    }
+  },
+
+  UiFocus: async () => {
+    const deny = uiGate()
+    if (deny) return deny
+    const r = await runAgent('focus', {})
+    if (r.ok === false) return uiFail(r)
+    return {
+      ok: true,
+      foreground: r.foreground,
+      window: r.window,
+      __ui_summary: r.foreground ? '启动器已切到前台' : '置前未成功',
+      __ui_text: r.foreground
+        ? '启动器窗口已切到前台，可以继续操作。'
+        : '已尝试把启动器切到前台，但它当前不是前台窗口（可能有别的窗口抢焦点），点击可能无效。',
+    }
+  },
+
+  UiScreenshot: async () => {
+    const deny = uiGate()
+    if (deny) return deny
+    const r = await runAgent('screenshot', {})
+    if (r.ok === false) return uiFail(r)
+    const dataUrl = await readShotDataUrl()
+    if (!dataUrl) {
+      const msg = '截图已生成，但读取截图文件失败。'
+      return { error: msg, __ui_text: `ERROR[E_SHOT_READ] ${msg}` }
+    }
+    const kb = Math.round((Number(r.bytes) || 0) / 1024)
+    return {
+      ok: true,
+      width: r.width,
+      height: r.height,
+      captured: r.captured,
+      __ui_summary: `已截图 ${r.width}x${r.height}`,
+      __ui_text: `截图已作为图片附加在对话中（${r.width}x${r.height}，${kb}KB，方式 ${r.captured}），你可以直接查看。`,
+      __ui_image: dataUrl,
+    }
+  },
 }
 
 export { handlers }
@@ -698,4 +916,6 @@ export const toolNamesCN: Record<string, string> = {
   bingSearch: '网页搜索', fetchWeb: '抓取网页', Read: '读取文件', Write: '写入文件', Edit: '编辑文件',
   Grep: '搜索内容', Bash: '执行命令', Compress: '压缩', Decompress: '解压', convertDocument: '文档转换',
   sleep: '延迟等待',
+  UiSnapshot: '界面快照', UiClick: '点击界面', UiType: '界面输入',
+  UiKeys: '界面按键', UiFocus: '激活窗口', UiScreenshot: '界面截图',
 }

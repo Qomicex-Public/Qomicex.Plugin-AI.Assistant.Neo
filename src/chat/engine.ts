@@ -1,10 +1,12 @@
 import type { ChatMessage, UiMessage, ToolEntryLine, ReasoningEffort, Modality, MessagePart, FilePermission } from './types.ts'
 import { getApi } from '../api.ts'
-import { SYSTEM_PROMPT } from './systemPrompt.ts'
+import { SYSTEM_PROMPT, UI_CONTROL_PROMPT } from './systemPrompt.ts'
 import { toolDefs } from './toolDefs.ts'
+import { uiToolDefs } from './uiTools.ts'
 import { handlers, setApiRef, toolNamesCN, type ToolArgs } from './handlers.ts'
 import { setToolPermission } from './fileTools.ts'
-import { workspacePromptSection } from './permissions.ts'
+import { setUiControlEnabled } from './uiControl.ts'
+import { workspacePromptSection, isWindowsPlatform } from './permissions.ts'
 import { streamTurn, type StreamTurnCtx } from './stream.ts'
 import { compressContext, manualCompress, summarizeToolResult, estimateTokens, loadDsTokenizer, type CompressDeps } from './compress.ts'
 import { renderMd, renderMdSync } from './markdown.ts'
@@ -42,6 +44,8 @@ export interface EngineSnapshot {
     effectivePermission: FilePermission
     /** 单次回复输出上限 */
     maxTokens: number
+    /** 「启动器操作」（UI 自动化）总开关 */
+    uiControl: boolean
     configured: boolean
     thinking: boolean
   }
@@ -67,6 +71,8 @@ const state = {
   modalities: ['text'] as Modality[],
   /** 全局默认文件权限 */
   filePermission: 'readonly' as FilePermission,
+  /** 「启动器操作」开关：开启后才会把这组 UI 自动化工具挂给模型 */
+  uiControl: false,
   /** 单次回复输出上限（思考与正文共享） */
   maxTokens: 8192,
   /** 会话级文件权限覆盖；null = 跟随全局默认 */
@@ -106,6 +112,7 @@ function buildSnapshot(): EngineSnapshot {
       filePermission: state.filePermission,
       effectivePermission: state.permissionOverride ?? state.filePermission,
       maxTokens: state.maxTokens,
+      uiControl: state.uiControl,
       configured: !!state.apiKey,
       thinking: state.thinking,
     },
@@ -168,11 +175,58 @@ function addToolEntry(toolName: string, argsText: string, timeMs: number): numbe
   return id
 }
 
-function addToolResult(detailId: number, resultText: string) {
+function addToolResult(detailId: number, resultText: string, image?: string) {
   if (detailId < 0) return
   const line: ToolEntryLine = { result: resultText }
-  ui = ui.map((m) => (m.id === detailId ? { ...m, toolLines: [...(m.toolLines || []), line] } : m))
+  // 带截图的结果默认展开：图就是结论，折叠起来等于让用户多点一次
+  ui = ui.map((m) =>
+    m.id === detailId ? { ...m, toolLines: [...(m.toolLines || []), line], ...(image ? { image: image, collapsed: false } : {}) } : m,
+  )
   emit()
+}
+
+/**
+ * 摘出界面截图的 data URL（就地删除，避免它被序列化进工具消息）。
+ *
+ * UiScreenshot 的结果里带着几百 KB 的 base64，**绝不能作为 tool 消息发出去** ——
+ * 那会瞬间吃掉整个上下文，而且它本身也不是文本。所以这里摘掉，由调用方作为一条
+ * 独立的「带图片的 user 消息」发给模型。
+ */
+function takeUiImages(result: unknown): string[] {
+  const out: string[] = []
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return out
+  const holder = result as Record<string, any>
+  const img = holder.__ui_image
+  if (typeof img === 'string' && img) out.push(img)
+  else if (img && typeof img.dataUrl === 'string' && img.dataUrl) out.push(img.dataUrl)
+  if (img !== undefined) delete holder.__ui_image
+  return out
+}
+
+/**
+ * 工具结果 → 发给模型的文本。
+ *
+ * 默认走 summarizeToolResult（对象只保留 4 个键、每值 80 字），这对普通 API 结果
+ * 够用，但会把界面快照的元素清单削光。所以界面类工具自己在 handler 里排好版并用
+ * __ui_text 给出已按字符预算裁剪的正文，这里直接透传。
+ */
+function toolResultText(name: string, result: unknown): string {
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    const t = (result as Record<string, unknown>).__ui_text
+    if (typeof t === 'string' && t) return t
+  }
+  return summarizeToolResult(name, result)
+}
+
+/** 工具卡片上显示的一行摘要（界面类工具自带更可读的 __ui_summary）。 */
+function toolSummary(result: unknown): string {
+  if (Array.isArray(result)) return '返回 ' + result.length + ' 项'
+  if (result && typeof result === 'object') {
+    const r = result as Record<string, any>
+    if (typeof r.__ui_summary === 'string' && r.__ui_summary) return r.__ui_summary
+    return r.error ? '错误: ' + r.error : '完成'
+  }
+  return String(result).slice(0, 50)
 }
 
 export function toggleToolEntry(id: number) {
@@ -414,7 +468,27 @@ async function buildSystemPrompt(): Promise<string> {
       : perm === 'write'
         ? '可写：Read / Write / Edit / Grep / Bash / Compress / Decompress 均可用；首次访问未授权目录时启动器会弹窗要用户授权。'
         : '完全访问：所有文件与命令工具均可用，不再逐一确认。仍应避免破坏性操作。'
-  return `${SYSTEM_PROMPT}\n${cachedWorkspaceSection}\n\n## 当前文件权限\n${permText}`
+  // 界面操作章节只在开关打开时给：没开就不提，模型才不会以为自己能点界面
+  const uiText = state.uiControl && isWindowsPlatform() ? `\n${UI_CONTROL_PROMPT}` : ''
+  return `${SYSTEM_PROMPT}\n${cachedWorkspaceSection}\n\n## 当前文件权限\n${permText}${uiText}`
+}
+
+/**
+ * 本次请求实际可用的工具集。
+ *
+ * 「启动器操作」是独立开关（与文件权限解耦）。关闭时这 6 个工具**根本不进工具列表**
+ * —— 比让模型调用后再吃一个「未开启」的拒绝更省 token，也更不容易让它误判能力边界。
+ *
+ * 两个额外过滤：
+ *   - 非 Windows 不提供（驱动依赖 UIAutomation + 真实鼠标键盘）。
+ *   - 模型没声明 image 模态时不提供 UiScreenshot：截了也没法看，纯浪费一次抓屏。
+ */
+function getActiveToolDefs(): typeof toolDefs {
+  if (!state.uiControl || !isWindowsPlatform()) return toolDefs
+  const extra = uiToolDefs.filter(
+    (t) => t.function.name !== 'UiScreenshot' || state.modalities.includes('image'),
+  )
+  return [...toolDefs, ...extra]
 }
 
 function streamCtx(): StreamTurnCtx {
@@ -422,7 +496,7 @@ function streamCtx(): StreamTurnCtx {
     model: state.model,
     baseUrl: state.baseUrl,
     apiKey: state.apiKey,
-    tools: toolDefs,
+    tools: getActiveToolDefs(),
     // 会话覆盖优先，其次全局默认；'off' 时 stream 层不会发送 reasoning_effort
     reasoningEffort: state.effortOverride ?? state.reasoningEffort,
     maxTokens: state.maxTokens,
@@ -445,12 +519,41 @@ export function setSessionPermission(perm: FilePermission | null) {
 /** 把当前生效的权限同步给工具层（每次工具调用前也会再同步一次）。 */
 function syncToolPermission() {
   setToolPermission(state.permissionOverride ?? state.filePermission)
+  setUiControlEnabled(state.uiControl)
+}
+
+/**
+ * 发送前轻量同步「全局默认」里会影响本次请求的字段。
+ *
+ * 聊天页 / 悬浮窗 / 设置页是彼此独立的 iframe，内存不互通：用户在设置页改了默认值，
+ * 聊天页的 engine 实例并不知道。不同步就会出现「设置里明明开了启动器操作，聊天里
+ * 却没有那几个工具」。这里只取能力类字段，不碰会话级覆盖。
+ */
+async function resyncGlobals(): Promise<void> {
+  const api = getApi()
+  if (!api || !api.call) return
+  try {
+    const s: any = (await api.call('getSettings')) || {}
+    state.uiControl = s.uiControl === true
+    if (s.filePermission) state.filePermission = s.filePermission as FilePermission
+    if (s.reasoningEffort) state.reasoningEffort = s.reasoningEffort as ReasoningEffort
+    if (Array.isArray(s.modalities) && s.modalities.length) state.modalities = s.modalities as Modality[]
+    if (typeof s.maxTokens === 'number' && s.maxTokens > 0) state.maxTokens = s.maxTokens
+    if (s.showToolProcess !== undefined) state.showToolProcess = s.showToolProcess !== false
+    syncToolPermission()
+    emit()
+  } catch {
+    // 读不到就沿用当前值，绝不因为一次读取失败阻断发送
+  }
 }
 
 export async function sendMessage(text: string, parts?: MessagePart[]): Promise<void> {
   if (state.thinking) return
   state.thinking = true
   emit()
+
+  // 三个界面内存不互通：发送前同步一次能力类全局设置（启动器操作开关、权限、模态…）
+  await resyncGlobals()
 
   const hasParts = Array.isArray(parts) && parts.length > 0
   pushUi({ kind: 'user', content: text, attachments: hasParts ? parts.filter((p) => p.type !== 'text') : undefined })
@@ -577,6 +680,8 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
       lastRender = 0
       state.messages.push({ role: 'assistant', content: turn.content || null, tool_calls: turn.toolCalls })
       const elapsed = Date.now() - t0
+      /** 本轮工具调用产出的界面截图（data URL），循环结束后作为带图消息发给模型 */
+      const uiImages: string[] = []
       for (const tc of turn.toolCalls) {
         const args: ToolArgs = {}
         try {
@@ -592,16 +697,19 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
         } catch (e: any) {
           result = { error: e.message || String(e) }
         }
-        const summary =
-          typeof result === 'object' && result !== null
-            ? Array.isArray(result)
-              ? '返回 ' + result.length + ' 项'
-              : (result as any).error
-                ? '错误: ' + (result as any).error
-                : '完成'
-            : String(result).slice(0, 50)
-        addToolResult(detailId, summary)
-        state.messages.push({ role: 'tool', tool_call_id: tc.id, content: summarizeToolResult(tc.function.name, result) })
+        const images = takeUiImages(result)
+        uiImages.push(...images)
+        addToolResult(detailId, toolSummary(result), images[0])
+        state.messages.push({ role: 'tool', tool_call_id: tc.id, content: toolResultText(tc.function.name, result) })
+      }
+      if (uiImages.length) {
+        state.messages.push({
+          role: 'user',
+          content: [
+            { type: 'text', text: '（上面 UiScreenshot 抓到的启动器界面截图，供你核对界面状态）' },
+            ...uiImages.map((url) => ({ type: 'image_url' as const, image_url: { url: url } })),
+          ],
+        })
       }
       updateCtxDisplay()
       t0 = Date.now()
@@ -748,6 +856,7 @@ export function saveConfig(
     modalities?: Modality[]
     filePermission?: FilePermission
     maxTokens?: number
+    uiControl?: boolean
   },
   opts: {
     /**
@@ -766,6 +875,7 @@ export function saveConfig(
   if (cfg.modalities) state.modalities = cfg.modalities.length ? cfg.modalities : ['text']
   if (cfg.filePermission) state.filePermission = cfg.filePermission
   if (cfg.maxTokens) state.maxTokens = cfg.maxTokens
+  if (cfg.uiControl !== undefined) state.uiControl = cfg.uiControl === true
   // 全局默认变化后，会话级覆盖失效
   state.effortOverride = null
   state.permissionOverride = null
@@ -781,6 +891,7 @@ export function saveConfig(
     .then(() => api.call('setSettings', 'showToolProcess', state.showToolProcess))
     .then(() => api.call('setSettings', 'reasoningEffort', state.reasoningEffort))
     .then(() => api.call('setSettings', 'filePermission', state.filePermission))
+    .then(() => api.call('setSettings', 'uiControl', state.uiControl))
     .then(() => api.call('setSettings', 'maxTokens', state.maxTokens))
     .then(() => api.call('setSettings', 'modalities', state.modalities))
     .then(() => {
@@ -823,6 +934,7 @@ export function init(): void {
           ? (settings.modalities as Modality[])
           : ['text']
         state.filePermission = (settings.filePermission as FilePermission) || 'readonly'
+        state.uiControl = settings.uiControl === true
         state.maxTokens = typeof settings.maxTokens === 'number' && settings.maxTokens > 0 ? settings.maxTokens : 8192
         syncToolPermission()
         view = 'chat'

@@ -24,6 +24,10 @@ export interface ChatConfig {
   modalities: Modality[]
   /** 文件操作权限（全局默认） */
   filePermission: FilePermission
+  /** 单次回复输出上限 */
+  maxTokens: number
+  /** 「启动器操作」（UI 自动化）总开关，与文件权限独立 */
+  uiControl: boolean
 }
 
 export type UiMsgKind = 'user' | 'ai' | 'thinking' | 'tool' | 'progress'
@@ -43,16 +47,6 @@ export interface MessagePart {
   text?: string
   image_url?: { url: string }
   video_url?: { url: string }
-}
-
-export interface ChatConfig {
-  apiKey: string
-  baseUrl: string
-  model: string
-  maxCtx: number
-  showToolProcess: boolean
-  reasoningEffort: ReasoningEffort
-  modalities: Modality[]
 }
 
 export interface ToolEntryLine {
@@ -77,6 +71,8 @@ export interface UiMessage {
   detail?: string
   /** 用户消息携带的附件（图片/视频），仅用于气泡内展示 */
   attachments?: MessagePart[]
+  /** 工具条目附带的截图（data URL），用于在工具卡片里内联预览 */
+  image?: string
   /** 用于 AI 消息渲染时避免与工具块标记冲突 */
   rawText?: string
 }
