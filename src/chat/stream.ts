@@ -21,10 +21,11 @@ export interface StreamResult {
 /**
  * 从响应对象里取思考片段。
  *
- * 不同 provider 字段名与挂载位置都不一样，这里做宽口径兼容：
- *   - 字段名：reasoning_content / reasoning / thinking / thinking_content
- *   - 位置：delta（流式）/ message（非流式）/ 顶层（部分网关）
- * 只接受非空字符串，避免把对象/数组误当内容。
+ * 只认「思考」字段本身，**绝不回退到 content**——部分服务端会在同一帧同时下发
+ * `content` 与 `reasoning_content`（实测 step-3.7-flash 即如此），若做字段回退
+ * 会把正文误判成思考过程。
+ *
+ * 字段名兼容：reasoning_content / reasoning / thinking / thinking_content。
  */
 function pickReasoning(obj: any): string {
   if (!obj || typeof obj !== 'object') return ''
@@ -35,14 +36,16 @@ function pickReasoning(obj: any): string {
   return ''
 }
 
-/** 依次在 delta / message / 顶层中寻找思考片段。 */
+/** 在 delta / message / 顶层中寻找思考片段（仍只认思考字段）。 */
 function pickReasoningDeep(node: any): string {
   if (!node || typeof node !== 'object') return ''
   return (
-    pickReasoning(node) ||
     pickReasoning(node.delta) ||
     pickReasoning(node.message) ||
-    (Array.isArray(node.choices) && node.choices[0] ? pickReasoning(node.choices[0]) || pickReasoning(node.choices[0].delta) || pickReasoning(node.choices[0].message) : '')
+    pickReasoning(node) ||
+    (Array.isArray(node.choices) && node.choices[0]
+      ? pickReasoning(node.choices[0].delta) || pickReasoning(node.choices[0].message) || pickReasoning(node.choices[0])
+      : '')
   )
 }
 
@@ -180,7 +183,13 @@ export function streamTurn(
                 const choice = json.choices && json.choices[0]
                 if (!choice) continue
                 const delta = choice.delta || {}
-                const rc = pickReasoning(delta) || pickReasoningDeep(json) || pickReasoning(choice)
+                /**
+                 * 思考与正文必须**各自独立累加**。
+                 * 实测该端点会在同一帧同时给出二者（如 {content:"2", reasoning:"。"}），
+                 * 所以这里只从 delta 的思考字段取值，不做跨字段/跨层回退，
+                 * 也不允许 reasoning 与 content 互相顶替。
+                 */
+                const rc = pickReasoning(delta)
                 if (rc) {
                   reasoning += rc
                   if (onReasoning) onReasoning(reasoning)

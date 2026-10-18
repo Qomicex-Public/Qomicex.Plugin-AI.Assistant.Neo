@@ -544,27 +544,53 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
     return cacheGet(ck)
       .then((cached) => {
         if (cached) return cached
-        return api!
-          .call('proxyFetch', {
-            url: 'https://cn.bing.com/search?q=' + encodeURIComponent(key) + '&format=rss&count=' + limit,
-            method: 'GET',
-            headers: { 'Accept-Language': 'zh-CN,zh;q=0.9' },
-            timeoutMs: 20000,
-          })
-          .then((res: any) => {
-            if (!res || res.status !== 200) throw new Error('bing 返回 ' + (res && res.status))
-            const results = parseBingRss(res.body || '')
+        /**
+         * 用 www.bing.com：cn.bing.com/search?...&format=rss 会返回 301 跳转，
+         * 而启动器 proxyFetch 不跟随重定向（拿到的是空 body 的 301）。
+         * www.bing.com 直接 200 并返回 RSS。
+         */
+        const buildUrl = (host: string) =>
+          'https://' + host + '/search?q=' + encodeURIComponent(key) + '&format=rss&count=' + limit
+
+        const attempt = (host: string) =>
+          api!
+            .call('proxyFetch', {
+              url: buildUrl(host),
+              method: 'GET',
+              headers: { 'Accept-Language': 'zh-CN,zh;q=0.9' },
+              timeoutMs: 20000,
+            })
+            .then((res: any) => {
+              const status = res && res.status
+              const body = String((res && res.body) || '')
+              // 3xx：换 host 重试一次（代理不跟随重定向）
+              if (status >= 300 && status < 400) return { redirect: true, status }
+              if (status !== 200) throw new Error('bing 返回 ' + status)
+              if (!body) throw new Error('bing 返回空响应')
+              return { body }
+            })
+
+        return attempt('www.bing.com').then((r: any) => {
+          if (r.redirect) return attempt('cn.bing.com')
+          return r
+        })
+          .then((r: any) => {
+            if (r.redirect) throw new Error('bing 返回 ' + r.status + '（重定向未跟随）')
+            const results = parseBingRss(r.body)
+            if (results.length === 0) {
+              return { keyword: key, results: [], _hint: '未解析到结果，可能被反爬拦截；可改用 fetchWeb 直接抓取已知站点。' }
+            }
             const out = {
               keyword: key,
-              results: results,
+              results: results.slice(0, limit),
               _hint: '以下是搜索候选项，snippet 仅为摘要。请用 fetchWeb 抓取最相关的 1-2 个结果核实内容后再回答，不要仅凭摘要下结论。',
             }
-            if (results.length) cacheSet(ck, out, 86400)
+            cacheSet(ck, out, 86400)
             return out
           })
       })
       .catch((e) => {
-        return { keyword: key, error: '搜索失败: ' + e.message }
+        return { keyword: key, error: '搜索失败: ' + (e && e.message ? e.message : String(e)) }
       })
   },
   fetchWeb: (a) => {

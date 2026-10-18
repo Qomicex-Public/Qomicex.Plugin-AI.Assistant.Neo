@@ -44,7 +44,7 @@ function FlowingText({ text }: { text: string }) {
   )
 }
 
-type IconName = 'stop' | 'refresh' | 'settings' | 'chevron' | 'copy' | 'check' | 'history' | 'close' | 'trash' | 'send' | 'attach'
+type IconName = 'stop' | 'refresh' | 'plus' | 'settings' | 'chevron' | 'copy' | 'check' | 'history' | 'close' | 'trash' | 'send' | 'attach'
 function Icon({ name, size = 15 }: { name: IconName; size?: number }) {
   const p = {
     width: size,
@@ -71,11 +71,17 @@ function Icon({ name, size = 15 }: { name: IconName; size?: number }) {
           <path d="M3 3v5h5" />
         </svg>
       )
+    case 'plus':
+      return (
+        <svg {...p}>
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      )
     case 'settings':
       return (
         <svg {...p}>
-          <circle cx="12" cy="12" r="3" />
-          <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1" />
+          <circle cx="12" cy="12" r="3.2" />
+          <path d="M19.2 14.4a1.6 1.6 0 0 0 .32 1.77l.06.06a1.94 1.94 0 1 1-2.75 2.75l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-.97 1.47V20a1.94 1.94 0 1 1-3.88 0v-.1a1.6 1.6 0 0 0-1.05-1.47 1.6 1.6 0 0 0-1.77.32l-.06.06a1.94 1.94 0 1 1-2.75-2.75l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-.97H4a1.94 1.94 0 1 1 0-3.88h.1a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a1.94 1.94 0 1 1 2.75-2.75l.06.06a1.6 1.6 0 0 0 1.77.32h.08A1.6 1.6 0 0 0 10 4.1V4a1.94 1.94 0 1 1 3.88 0v.1a1.6 1.6 0 0 0 .97 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a1.94 1.94 0 1 1 2.75 2.75l-.06.06a1.6 1.6 0 0 0-.32 1.77v.08a1.6 1.6 0 0 0 1.47.97H20a1.94 1.94 0 1 1 0 3.88h-.1a1.6 1.6 0 0 0-1.47.97z" />
         </svg>
       )
     case 'history':
@@ -479,7 +485,7 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
               closeHistory()
             }}
           >
-            <Icon name="refresh" size={13} />
+            <Icon name="plus" size={13} />
           </button>
           {variant === 'overlay' && (
             <button className="icon-btn" type="button" title="关闭" onClick={closeHistory}>
@@ -608,7 +614,7 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
               </button>
             )}
             <button className="icon-btn" title="新对话" type="button" onClick={newChat}>
-              <Icon name="refresh" />
+              <Icon name="plus" />
             </button>
             <button className="icon-btn" title="设置（启动器插件设置）" type="button" onClick={openPluginSettings}>
               <Icon name="settings" />
