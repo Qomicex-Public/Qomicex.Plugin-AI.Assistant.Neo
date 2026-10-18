@@ -13,6 +13,7 @@ const DEFAULTS: ConfigValues = {
   modalities: ['text'],
   filePermission: 'readonly',
   maxTokens: 8192,
+  uiControl: false,
 }
 
 export default function SettingsApp() {
@@ -44,6 +45,7 @@ export default function SettingsApp() {
             : ['text'],
           filePermission: (settings.filePermission as FilePermission) || 'readonly',
           maxTokens: typeof settings.maxTokens === 'number' && settings.maxTokens > 0 ? settings.maxTokens : 8192,
+          uiControl: settings.uiControl === true,
         })
       })
       .catch(() => setInitial(DEFAULTS))

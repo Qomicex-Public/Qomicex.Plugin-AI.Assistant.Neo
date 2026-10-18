@@ -52,6 +52,11 @@ function isWindows(): boolean {
   return /Windows|Win32|Win64/i.test(nav)
 }
 
+/** 供其他模块（如界面操作工具）判断平台。 */
+export function isWindowsPlatform(): boolean {
+  return isWindows()
+}
+
 /** 去掉路径尾部分隔符。 */
 function trimSep(p: string): string {
   return String(p || '').replace(/[\\/]+$/, '')
