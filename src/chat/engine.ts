@@ -1,8 +1,10 @@
-import type { ChatMessage, UiMessage, ToolEntryLine, ReasoningEffort, Modality, MessagePart } from './types.ts'
+import type { ChatMessage, UiMessage, ToolEntryLine, ReasoningEffort, Modality, MessagePart, FilePermission } from './types.ts'
 import { getApi } from '../api.ts'
 import { SYSTEM_PROMPT } from './systemPrompt.ts'
 import { toolDefs } from './toolDefs.ts'
 import { handlers, setApiRef, toolNamesCN, type ToolArgs } from './handlers.ts'
+import { setToolPermission } from './fileTools.ts'
+import { workspacePromptSection } from './permissions.ts'
 import { streamTurn, type StreamTurnCtx } from './stream.ts'
 import { compressContext, manualCompress, summarizeToolResult, estimateTokens, loadDsTokenizer, type CompressDeps } from './compress.ts'
 import { renderMd, renderMdSync } from './markdown.ts'
@@ -34,6 +36,10 @@ export interface EngineSnapshot {
     effectiveEffort: ReasoningEffort
     /** 该模型支持的模态 */
     modalities: Modality[]
+    /** 全局默认文件权限 */
+    filePermission: FilePermission
+    /** 当前生效的文件权限（会话覆盖优先） */
+    effectivePermission: FilePermission
     configured: boolean
     thinking: boolean
   }
@@ -57,6 +63,10 @@ const state = {
   showToolProcess: true,
   reasoningEffort: 'off' as ReasoningEffort,
   modalities: ['text'] as Modality[],
+  /** 全局默认文件权限 */
+  filePermission: 'readonly' as FilePermission,
+  /** 会话级文件权限覆盖；null = 跟随全局默认 */
+  permissionOverride: null as FilePermission | null,
   /** 会话级思考强度覆盖；null = 跟随全局默认 */
   effortOverride: null as ReasoningEffort | null,
   thinking: false,
@@ -89,6 +99,8 @@ function buildSnapshot(): EngineSnapshot {
       reasoningEffort: state.reasoningEffort,
       effectiveEffort: state.effortOverride ?? state.reasoningEffort,
       modalities: state.modalities,
+      filePermission: state.filePermission,
+      effectivePermission: state.permissionOverride ?? state.filePermission,
       configured: !!state.apiKey,
       thinking: state.thinking,
     },
@@ -375,6 +387,31 @@ export function stopGeneration() {  stopRequested = true
   pushUi({ kind: 'ai', content: '（已停止）', streaming: false })
 }
 
+/**
+ * 组装系统提示词：基础规则 + 工作区路径 + 当前文件权限。
+ *
+ * 工作区路径每次会话开始时解析一次并缓存（resolveWorkspace 内部有 cache），
+ * 权限则实时反映当前生效值，让 AI 知道现在能做什么、不能做什么。
+ */
+let cachedWorkspaceSection: string | null = null
+async function buildSystemPrompt(): Promise<string> {
+  if (cachedWorkspaceSection === null) {
+    try {
+      cachedWorkspaceSection = await workspacePromptSection()
+    } catch {
+      cachedWorkspaceSection = ''
+    }
+  }
+  const perm = state.permissionOverride ?? state.filePermission
+  const permText =
+    perm === 'readonly'
+      ? '只读：只能用 Read / Grep，禁止 Write / Edit / Bash / Compress / Decompress。'
+      : perm === 'write'
+        ? '可写：Read / Write / Edit / Grep / Bash / Compress / Decompress 均可用；首次访问未授权目录时启动器会弹窗要用户授权。'
+        : '完全访问：所有文件与命令工具均可用，不再逐一确认。仍应避免破坏性操作。'
+  return `${SYSTEM_PROMPT}\n${cachedWorkspaceSection}\n\n## 当前文件权限\n${permText}`
+}
+
 function streamCtx(): StreamTurnCtx {
   return {
     model: state.model,
@@ -390,6 +427,18 @@ function streamCtx(): StreamTurnCtx {
 export function setSessionEffort(effort: ReasoningEffort | null) {
   state.effortOverride = effort
   emit()
+}
+
+/** 会话内切换文件权限（只影响当前会话，不改全局设置）。 */
+export function setSessionPermission(perm: FilePermission | null) {
+  state.permissionOverride = perm
+  syncToolPermission()
+  emit()
+}
+
+/** 把当前生效的权限同步给工具层（每次工具调用前也会再同步一次）。 */
+function syncToolPermission() {
+  setToolPermission(state.permissionOverride ?? state.filePermission)
 }
 
 export async function sendMessage(text: string, parts?: MessagePart[]): Promise<void> {
@@ -496,7 +545,7 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
   }
 
   try {
-    let msgs: ChatMessage[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...state.messages]
+    let msgs: ChatMessage[] = [{ role: 'system', content: await buildSystemPrompt() }, ...state.messages]
     let loops = 10
     let t0 = Date.now()
     // 消息一入队就落盘一次：保证「有用户消息的会话」立刻出现在历史里
@@ -531,6 +580,8 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
         const handler = handlers[tc.function.name]
         let result: unknown
         try {
+          // 每次工具调用前同步权限（会话覆盖优先），确保门禁与下拉框一致
+          syncToolPermission()
           result = handler ? await handler(args) : { error: 'unknown tool' }
         } catch (e: any) {
           result = { error: e.message || String(e) }
@@ -548,7 +599,7 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
       }
       updateCtxDisplay()
       t0 = Date.now()
-      msgs = [{ role: 'system', content: SYSTEM_PROMPT }, ...state.messages]
+      msgs = [{ role: 'system', content: await buildSystemPrompt() }, ...state.messages]
       const tId = pushUi({ kind: 'thinking', thinkingStart: Date.now() })
       turn = await streamTurn(msgs, signal, onDelta, streamCtx(), (r) => setThinkingDetail(tId, r))
       finishThinking(tId)
@@ -666,6 +717,7 @@ export function saveConfig(
     showToolProcess: boolean
     reasoningEffort?: ReasoningEffort
     modalities?: Modality[]
+    filePermission?: FilePermission
   },
   opts: {
     /**
@@ -682,8 +734,11 @@ export function saveConfig(
   state.showToolProcess = cfg.showToolProcess !== false
   if (cfg.reasoningEffort !== undefined) state.reasoningEffort = cfg.reasoningEffort
   if (cfg.modalities) state.modalities = cfg.modalities.length ? cfg.modalities : ['text']
+  if (cfg.filePermission) state.filePermission = cfg.filePermission
   // 全局默认变化后，会话级覆盖失效
   state.effortOverride = null
+  state.permissionOverride = null
+  syncToolPermission()
   if (!opts.settingsMode) newChat()
   const api = getApi()
   if (!api || !api.call) return Promise.resolve({ ok: false, error: 'API 桥接不可用' })
@@ -694,6 +749,7 @@ export function saveConfig(
     .then(() => api.call('setSettings', 'maxCtx', state.maxCtx))
     .then(() => api.call('setSettings', 'showToolProcess', state.showToolProcess))
     .then(() => api.call('setSettings', 'reasoningEffort', state.reasoningEffort))
+    .then(() => api.call('setSettings', 'filePermission', state.filePermission))
     .then(() => api.call('setSettings', 'modalities', state.modalities))
     .then(() => {
       if (!opts.settingsMode) showChatView()
@@ -734,6 +790,8 @@ export function init(): void {
         state.modalities = Array.isArray(settings.modalities) && settings.modalities.length
           ? (settings.modalities as Modality[])
           : ['text']
+        state.filePermission = (settings.filePermission as FilePermission) || 'readonly'
+        syncToolPermission()
         view = 'chat'
         // 注意：这里**不能**调用 newChat()——newChat 会生成新会话 id 并写回 cache，
         // 把胶囊/其他界面正在使用的「当前会话」覆盖掉，「继续当前会话」就失效了。

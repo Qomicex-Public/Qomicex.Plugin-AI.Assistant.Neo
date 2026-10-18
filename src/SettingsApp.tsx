@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { getApi } from './api.ts'
 import ConfigForm, { type ConfigValues } from './components/ConfigForm.tsx'
-import type { ReasoningEffort, Modality } from './chat/types.ts'
+import type { ReasoningEffort, Modality, FilePermission } from './chat/types.ts'
 
 const DEFAULTS: ConfigValues = {
   baseUrl: 'https://api.deepseek.com/v1',
@@ -11,6 +11,7 @@ const DEFAULTS: ConfigValues = {
   showToolProcess: true,
   reasoningEffort: 'off',
   modalities: ['text'],
+  filePermission: 'readonly',
 }
 
 export default function SettingsApp() {
@@ -40,6 +41,7 @@ export default function SettingsApp() {
           modalities: Array.isArray(settings.modalities) && settings.modalities.length
             ? (settings.modalities as Modality[])
             : ['text'],
+          filePermission: (settings.filePermission as FilePermission) || 'readonly',
         })
       })
       .catch(() => setInitial(DEFAULTS))

@@ -508,41 +508,139 @@ export const toolDefs: ToolDef[] = [
   {
     type: 'function',
     function: {
-      name: 'readFile',
-      description: '读取电脑文件。高风险：仅用户明确要求时用，执行前说明路径；未授权路径会要求授权',
-      parameters: { type: 'object', properties: { path: { type: 'string', description: '文件绝对路径，如 C:\\Users\\xxx\\test.txt' } }, required: ['path'] },
+      name: 'Read',
+      description:
+        '读取文件内容，返回带行号的文本（形如 `  12| ...`）。支持 offset/limit 分页读大文件。' +
+        '二进制/文档类（pdf/docx/xlsx/图片/音视频）会自动走文档转换；转换不可用时返回明确错误。' +
+        '需要权限：只读及以上。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '文件绝对路径，如 C:\\Users\\xxx\\a.txt' },
+          offset: { type: 'integer', description: '起始行号（从 1 开始，可选）' },
+          limit: { type: 'integer', description: '最多读取行数（可选，默认 2000）' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'Write',
+      description:
+        '写入文件（覆盖已有内容；父目录不存在时会自动创建）。用于新建文件或整体重写。' +
+        '只想改几处时请用 Edit，不要整篇重写。需要权限：可写及以上。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '文件绝对路径' },
+          content: { type: 'string', description: '完整文件内容' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'Edit',
+      description:
+        '对文件做精确字符串替换（oldString → newString）。oldString 必须与原文完全一致（含缩进与中文标点）。' +
+        '若匹配到多处会报错，需补充上下文使匹配唯一，或设 replaceAll=true。需要权限：可写及以上。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '文件绝对路径' },
+          oldString: { type: 'string', description: '要被替换的原文（需唯一）' },
+          newString: { type: 'string', description: '替换后的内容' },
+          replaceAll: { type: 'boolean', description: '是否替换全部匹配（默认 false）' },
+        },
+        required: ['path', 'oldString', 'newString'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'Grep',
+      description:
+        '在目录中递归搜索文本（类 ripgrep）。返回 `路径:行号:内容`。适合定位代码、查找关键字。' +
+        '需要权限：只读及以上（只读也允许）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: '搜索内容（字面量或正则，取决于底层工具）' },
+          path: { type: 'string', description: '搜索根目录（默认当前工作区）' },
+          glob: { type: 'string', description: '文件名过滤，如 *.ts（可选）' },
+          caseInsensitive: { type: 'boolean', description: '是否忽略大小写（默认 true）' },
+          maxResults: { type: 'integer', description: '最多返回条数（默认 200，上限 1000）' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'Bash',
+      description:
+        '执行命令行命令。Windows 使用 PowerShell（powershell -NoProfile -Command），mac/linux 使用 /bin/sh -c。' +
+        '注意：不继承工作目录，请用 workdir 指定，或在命令里自行 cd / 用绝对路径；单次上限 120 秒，不能跑常驻进程。' +
+        '用于运行脚本、批处理、查询环境等。需要权限：可写及以上。',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: '要执行的命令（PowerShell / sh 语法）' },
+          workdir: { type: 'string', description: '执行目录绝对路径（可选，推荐填写）' },
+          timeoutMs: { type: 'integer', description: '超时毫秒（默认 120000，上限 120000）' },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'Decompress',
+      description:
+        '解压归档文件（.zip / .tar / .tar.gz / .tgz / .7z / .rar）。默认解压到临时工作区的独立子目录，' +
+        '返回顶层条目列表。需要权限：可写及以上。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '归档文件绝对路径' },
+          outDir: { type: 'string', description: '解压目标目录（可选，默认临时工作区/名字-时间戳）' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'Compress',
+      description:
+        '压缩文件或目录为归档（默认 .zip，可选 tar.gz）。默认输出到临时工作区。需要权限：可写及以上。',
+      parameters: {
+        type: 'object',
+        properties: {
+          sources: { type: 'array', items: { type: 'string' }, description: '要压缩的文件/目录绝对路径列表' },
+          out: { type: 'string', description: '输出归档绝对路径（可选，默认临时工作区/archive-时间戳.zip）' },
+          format: { type: 'string', enum: ['zip', 'tar.gz'], description: '归档格式（默认 zip）' },
+        },
+        required: ['sources'],
+      },
     },
   },
   {
     type: 'function',
     function: {
       name: 'convertDocument',
-      description: '把二进制文档（PDF/Word/Excel/PPT/图片/音频等）转 Markdown 后读取内容。依赖 MarkItDown 插件。高风险：仅用户明确要求时用，执行前说明路径',
+      description:
+        '把二进制文档（PDF/Word/Excel/PPT/图片/音频等）转 Markdown 后读取内容。依赖 MarkItDown 插件。' +
+        '（也已被 Read 自动处理，单独保留用于显式转换场景）',
       parameters: { type: 'object', properties: { path: { type: 'string', description: '文件绝对路径，如 C:\\Users\\xxx\\report.pdf' } }, required: ['path'] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'writeFile',
-      description: '写入内容到电脑文件（覆盖已有内容）。高风险：仅用户明确要求时用，先说明路径与内容概要并获确认',
-      parameters: { type: 'object', properties: { path: { type: 'string', description: '文件绝对路径，如 C:\\Users\\xxx\\test.txt' }, content: { type: 'string', description: '要写入的文本内容' } }, required: ['path', 'content'] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'deleteFile',
-      description: '删除电脑文件。极高风险（不可恢复）：仅用户明确要求时用，先复述路径并获确认',
-      parameters: { type: 'object', properties: { path: { type: 'string', description: '要删除的文件绝对路径，如 C:\\Users\\xxx\\test.txt' } }, required: ['path'] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'execCommand',
-      description: '执行一条 shell 命令（Windows 用 PowerShell）。极高风险：仅用户明确要求时用，先复述命令并获确认，不得用于未经要求的操作',
-      parameters: { type: 'object', properties: { command: { type: 'string', description: '要执行的命令' }, timeoutMs: { type: 'integer', description: '超时毫秒数（可选，默认 15000，范围 1000-120000）' } }, required: ['command'] },
     },
   },
   {
