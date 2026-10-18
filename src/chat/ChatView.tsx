@@ -720,6 +720,7 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                 reasoningEffort: snapshot.cfg.reasoningEffort,
                 modalities: snapshot.cfg.modalities,
                 filePermission: snapshot.cfg.filePermission,
+                maxTokens: snapshot.cfg.maxTokens,
               }}
               onSaved={showChatView}
               onBack={snapshot.cfg.configured ? showChatView : undefined}

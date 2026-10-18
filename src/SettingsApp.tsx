@@ -12,6 +12,7 @@ const DEFAULTS: ConfigValues = {
   reasoningEffort: 'off',
   modalities: ['text'],
   filePermission: 'readonly',
+  maxTokens: 8192,
 }
 
 export default function SettingsApp() {
@@ -42,6 +43,7 @@ export default function SettingsApp() {
             ? (settings.modalities as Modality[])
             : ['text'],
           filePermission: (settings.filePermission as FilePermission) || 'readonly',
+          maxTokens: typeof settings.maxTokens === 'number' && settings.maxTokens > 0 ? settings.maxTokens : 8192,
         })
       })
       .catch(() => setInitial(DEFAULTS))

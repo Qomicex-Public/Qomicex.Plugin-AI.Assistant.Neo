@@ -8,6 +8,12 @@ export interface StreamTurnCtx {
   tools: ToolDef[]
   /** 'off'（或未设置）时不发送 reasoning_effort 字段 */
   reasoningEffort?: ReasoningEffort
+  /**
+   * 单次回复的输出上限。注意：思考（reasoning）与正文共享这一预算，
+   * 开启高思考强度时若上限过小，模型可能把预算全用在思考上，
+   * 导致 finish_reason=length 且正文为空。
+   */
+  maxTokens?: number
 }
 
 export interface StreamResult {
@@ -54,11 +60,11 @@ function pickReasoningDeep(node: any): string {
  * 注意 reasoning_effort 是 OpenAI 风格字段；部分提供商可能不识别，
  * 那种情况由服务端返回错误，用户可在设置里关掉。
  */
-export function buildPayload(model: string, messages: ChatMessage[], effort?: ReasoningEffort): Record<string, unknown> {
+export function buildPayload(model: string, messages: ChatMessage[], effort?: ReasoningEffort, maxTokens = 8192): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model,
     messages,
-    max_tokens: 4096,
+    max_tokens: maxTokens,
   }
   if (effort && effort !== 'off') payload.reasoning_effort = effort
   return payload
@@ -124,7 +130,8 @@ export function streamTurn(
   const payload: TurnPayload = {
     model: ctx.model,
     messages: messages,
-    max_tokens: 4096,
+    // 思考与正文共享该预算：默认放宽到 8192，避免高思考强度把预算吃光导致正文为空
+    max_tokens: ctx.maxTokens && ctx.maxTokens > 0 ? ctx.maxTokens : 8192,
   }
   if (ctx.reasoningEffort && ctx.reasoningEffort !== 'off') payload.reasoning_effort = ctx.reasoningEffort
   if (ctx.model !== 'deepseek-reasoner') {

@@ -40,6 +40,8 @@ export interface EngineSnapshot {
     filePermission: FilePermission
     /** 当前生效的文件权限（会话覆盖优先） */
     effectivePermission: FilePermission
+    /** 单次回复输出上限 */
+    maxTokens: number
     configured: boolean
     thinking: boolean
   }
@@ -65,6 +67,8 @@ const state = {
   modalities: ['text'] as Modality[],
   /** 全局默认文件权限 */
   filePermission: 'readonly' as FilePermission,
+  /** 单次回复输出上限（思考与正文共享） */
+  maxTokens: 8192,
   /** 会话级文件权限覆盖；null = 跟随全局默认 */
   permissionOverride: null as FilePermission | null,
   /** 会话级思考强度覆盖；null = 跟随全局默认 */
@@ -101,6 +105,7 @@ function buildSnapshot(): EngineSnapshot {
       modalities: state.modalities,
       filePermission: state.filePermission,
       effectivePermission: state.permissionOverride ?? state.filePermission,
+      maxTokens: state.maxTokens,
       configured: !!state.apiKey,
       thinking: state.thinking,
     },
@@ -420,6 +425,7 @@ function streamCtx(): StreamTurnCtx {
     tools: toolDefs,
     // 会话覆盖优先，其次全局默认；'off' 时 stream 层不会发送 reasoning_effort
     reasoningEffort: state.effortOverride ?? state.reasoningEffort,
+    maxTokens: state.maxTokens,
   }
 }
 
@@ -615,6 +621,29 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
       return
     }
 
+    /**
+     * 输出被 max_tokens 截断时的明确提示。
+     *
+     * 思考与正文共享 max_tokens：若思考阶段就把预算用尽，会出现
+     * finish_reason=length 且**正文为空**——用户只会看到一坨思考内容，
+     * 误以为"回答跑进思考块了"。这里必须显式告知并提供可操作建议。
+     */
+    if (turn.finishReason === 'length') {
+      const hadContent = !!fullContent.trim()
+      const msg = hadContent
+        ? '\n\n---\n⚠️ 输出达到上限被截断（finish_reason=length）。可在设置中调大「单次回复上限」，或让回答更简短。'
+        : '⚠️ 本次没有生成正文：思考过程消耗完了输出上限（finish_reason=length），正文预算为 0。\n\n' +
+          '建议：调小「思考强度」，或在设置中调大「单次回复上限」后重试。'
+      fullContent = (fullContent || '') + msg
+      ensureAiDiv()
+      updateAiHtml(aiMsgId!, renderMdSync(fullContent), false, fullContent)
+      finishThinking(thinkingId)
+      state.messages.push({ role: 'assistant', content: fullContent })
+      updateCtxDisplay()
+      addTotalTime(Date.now() - thinkingStart)
+      return
+    }
+
     state.messages.push({ role: 'assistant', content: fullContent || '' })
     updateCtxDisplay()
     finalizeContent()
@@ -718,6 +747,7 @@ export function saveConfig(
     reasoningEffort?: ReasoningEffort
     modalities?: Modality[]
     filePermission?: FilePermission
+    maxTokens?: number
   },
   opts: {
     /**
@@ -735,6 +765,7 @@ export function saveConfig(
   if (cfg.reasoningEffort !== undefined) state.reasoningEffort = cfg.reasoningEffort
   if (cfg.modalities) state.modalities = cfg.modalities.length ? cfg.modalities : ['text']
   if (cfg.filePermission) state.filePermission = cfg.filePermission
+  if (cfg.maxTokens) state.maxTokens = cfg.maxTokens
   // 全局默认变化后，会话级覆盖失效
   state.effortOverride = null
   state.permissionOverride = null
@@ -750,6 +781,7 @@ export function saveConfig(
     .then(() => api.call('setSettings', 'showToolProcess', state.showToolProcess))
     .then(() => api.call('setSettings', 'reasoningEffort', state.reasoningEffort))
     .then(() => api.call('setSettings', 'filePermission', state.filePermission))
+    .then(() => api.call('setSettings', 'maxTokens', state.maxTokens))
     .then(() => api.call('setSettings', 'modalities', state.modalities))
     .then(() => {
       if (!opts.settingsMode) showChatView()
@@ -791,6 +823,7 @@ export function init(): void {
           ? (settings.modalities as Modality[])
           : ['text']
         state.filePermission = (settings.filePermission as FilePermission) || 'readonly'
+        state.maxTokens = typeof settings.maxTokens === 'number' && settings.maxTokens > 0 ? settings.maxTokens : 8192
         syncToolPermission()
         view = 'chat'
         // 注意：这里**不能**调用 newChat()——newChat 会生成新会话 id 并写回 cache，

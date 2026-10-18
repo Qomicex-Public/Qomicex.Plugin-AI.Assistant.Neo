@@ -11,6 +11,8 @@ export interface ConfigValues {
   reasoningEffort: ReasoningEffort
   modalities: Modality[]
   filePermission: FilePermission
+  /** 单次回复输出上限（思考与正文共享） */
+  maxTokens: number
 }
 
 interface ConfigFormProps {
@@ -74,6 +76,7 @@ export default function ConfigForm({
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(initial.reasoningEffort || 'off')
   const [modalities, setModalities] = useState<Modality[]>(initial.modalities?.length ? initial.modalities : ['text'])
   const [filePermission, setFilePermission] = useState<FilePermission>(initial.filePermission || 'readonly')
+  const [maxTokens, setMaxTokens] = useState<number>(initial.maxTokens || 8192)
   const [status, setStatus] = useState<{ text: string; color?: string }>({ text: '' })
   const [busy, setBusy] = useState(false)
 
@@ -92,6 +95,7 @@ export default function ConfigForm({
     setReasoningEffort(initial.reasoningEffort || 'off')
     setModalities(initial.modalities?.length ? initial.modalities : ['text'])
     setFilePermission(initial.filePermission || 'readonly')
+    setMaxTokens(initial.maxTokens || 8192)
     // 只在外部 initial 真正变化时同步（对象由父级按值重建）
   }, [
     initial.baseUrl,
@@ -101,6 +105,7 @@ export default function ConfigForm({
     initial.showToolProcess,
     initial.reasoningEffort,
     initial.filePermission,
+    initial.maxTokens,
     /* 数组按内容比较，避免父级每次渲染都重置 */
     initial.modalities?.join(','),
   ])
@@ -188,6 +193,7 @@ export default function ConfigForm({
         reasoningEffort,
         modalities: modes,
         filePermission,
+        maxTokens,
       },
       { settingsMode }
     )
@@ -261,6 +267,22 @@ export default function ConfigForm({
             </select>
           </div>
           <div className="field-hint">{EFFORTS.find((e) => e.value === reasoningEffort)?.hint}</div>
+        </div>
+
+        <div>
+          <label className="p-label">单次回复上限</label>
+          <div className="field-row">
+            <select className="p-input" value={maxTokens} onChange={(e) => setMaxTokens(parseInt(e.target.value) || 8192)}>
+              <option value={2048}>2048（省额度，长思考易截断）</option>
+              <option value={4096}>4096</option>
+              <option value={8192}>8192（推荐）</option>
+              <option value={16384}>16384</option>
+              <option value={32768}>32768（长文/深度思考）</option>
+            </select>
+          </div>
+          <div className="field-hint">
+            思考过程与正文**共享**这一上限。开启较高思考强度时，若上限太小，模型可能把预算全花在思考上导致正文为空。
+          </div>
         </div>
 
         <div>
