@@ -382,7 +382,24 @@ function rebuildUi(messages: ChatMessage[]): UiMessage[] {
   const out: UiMessage[] = []
   for (const m of messages) {
     if (m.role === 'user') {
-      out.push({ id: nextId(), kind: 'user', content: String(m.content || '') })
+      // 用户消息可能是纯文本，也可能是多模态 parts 数组（文本 + 图片/视频附件）——
+      // 后者要拆成「正文 + 附件缩略图」，否则气泡里会显示 [object Object]
+      if (Array.isArray(m.content)) {
+        const text = m.content
+          .filter((p) => p && p.type === 'text')
+          .map((p) => String(p.text || ''))
+          .join(' ')
+          .trim()
+        const attachments = m.content.filter((p) => p && p.type !== 'text')
+        out.push({
+          id: nextId(),
+          kind: 'user',
+          content: text,
+          attachments: attachments.length ? attachments : undefined,
+        })
+      } else {
+        out.push({ id: nextId(), kind: 'user', content: String(m.content || '') })
+      }
     } else if (m.role === 'assistant') {
       const text = String(m.content || '')
       if (!text && m.tool_calls && m.tool_calls.length) {

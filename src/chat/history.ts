@@ -46,13 +46,43 @@ export function newConversationId(): string {
   return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
 }
 
+/**
+ * 从消息 content 里取出可读文本。
+ * content 可能是纯字符串，也可能是多模态 parts 数组（文本 + 图片/视频）——
+ * 直接 String(parts) 会得到 "[object Object],[object Object]"。
+ */
+export function messageText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((p: any) => p && p.type === 'text' && typeof p.text === 'string')
+    .map((p: any) => String(p.text))
+    .join(' ')
+}
+
 /** 由首条用户消息派生会话标题。 */
-export function deriveTitle(text: string): string {
-  const t = String(text || '')
+export function deriveTitle(content: unknown): string {
+  const t = messageText(content)
     .replace(/\s+/g, ' ')
     .trim()
-  if (!t) return '新对话'
-  return t.length > 24 ? t.slice(0, 24) + '…' : t
+  if (t) return t.length > 24 ? t.slice(0, 24) + '…' : t
+  // 纯附件消息（例如直接粘贴一张截图就发送）：给一个能分辨的标题，而不是「新对话」
+  if (Array.isArray(content)) {
+    const kinds: string[] = []
+    if (content.some((p: any) => p && p.type === 'image_url')) kinds.push('图片')
+    if (content.some((p: any) => p && p.type === 'video_url')) kinds.push('视频')
+    if (kinds.length) return kinds.join('、') + '消息'
+  }
+  return '新对话'
+}
+
+/**
+ * 历史遗留的坏标题：早期版本对「带附件的用户消息」做了 String(content)，
+ * 而 content 是 parts 数组，于是标题变成了 "[object Object],[object Object]"。
+ * 读到就当没有标题，让调用方用派生标题兜底（发一条消息或重命名后即自愈）。
+ */
+export function isGarbageTitle(t: unknown): boolean {
+  return typeof t === 'string' && /^\s*\[object Object\]/.test(t)
 }
 
 export async function listConversations(): Promise<ConversationMeta[]> {
@@ -63,6 +93,7 @@ export async function listConversations(): Promise<ConversationMeta[]> {
     if (!Array.isArray(v)) return []
     return (v as ConversationMeta[])
       .filter((m) => m && typeof m.id === 'string')
+      .map((m) => (isGarbageTitle(m.title) ? { ...m, title: '新对话' } : m))
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
   } catch {
     return []
@@ -78,7 +109,7 @@ export async function loadConversation(id: string): Promise<StoredConversation |
     const d = v as StoredConversation
     return {
       id: d.id || id,
-      title: d.title || '新对话',
+      title: isGarbageTitle(d.title) ? '新对话' : d.title || '新对话',
       createdAt: d.createdAt || Date.now(),
       updatedAt: d.updatedAt || Date.now(),
       messages: Array.isArray(d.messages) ? d.messages : [],
@@ -103,10 +134,11 @@ export async function saveConversation(data: ConversationData & { id: string; ti
   const list = await listConversations()
   const prev = list.find((m) => m.id === data.id)
   const createdAt = prev?.createdAt || now
-  // 标题：没有标题或仍是占位时，用首条用户消息派生
+  // 标题：没有标题、仍是占位、或是历史遗留的 [object Object] 时，用首条用户消息派生
   const firstUser = data.messages.find((m) => m.role === 'user' && m.content)
-  const derived = firstUser ? deriveTitle(String(firstUser.content)) : ''
-  const title = !data.title || data.title === '新对话' ? derived || data.title || '新对话' : data.title
+  const derived = firstUser ? deriveTitle(firstUser.content) : ''
+  const placeholder = !data.title || data.title === '新对话' || isGarbageTitle(data.title)
+  const title = placeholder ? derived || (isGarbageTitle(data.title) ? '新对话' : data.title) || '新对话' : data.title
 
   const stored: StoredConversation = {
     id: data.id,
