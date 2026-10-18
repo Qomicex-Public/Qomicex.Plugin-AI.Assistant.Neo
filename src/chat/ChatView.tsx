@@ -218,6 +218,14 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
   const [pending, setPending] = useState<MessagePart[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const bootstrapped = useRef(false)
+  /** 有文件正被拖到页面上（显示整页提示层） */
+  const [dragActive, setDragActive] = useState(false)
+  /** 输入区下方的一行临时提示（如：模型未启用图片模态） */
+  const [hint, setHint] = useState('')
+  const hintTimer = useRef<number | null>(null)
+  /** 拖入/粘贴的监听只绑定一次，用 ref 读最新模态，避免闭包过期 */
+  const modalitiesRef = useRef<string[]>(snapshot.cfg.modalities)
+  modalitiesRef.current = snapshot.cfg.modalities
 
   useEffect(() => {
     init()
@@ -243,28 +251,75 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
     void sendMessage(initialMessage)
   }, [initialMessage])
 
+  /**
+   * 拖入 / 粘贴：图片与视频直接变成附件（与点「添加图片」同一条路），
+   * 其它文件保持原有行为 —— 把路径插进输入框，交给 AI 用 Read / Bash 处理。
+   */
   useEffect(() => {
+    function dragHasFiles(e: DragEvent) {
+      const types = e.dataTransfer?.types
+      return !!types && Array.prototype.indexOf.call(types, 'Files') >= 0
+    }
     function onDragOver(e: DragEvent) {
+      // 纯文本/链接的拖入交给浏览器默认行为，不拦截
+      if (!dragHasFiles(e)) return
       e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+      setDragActive(true)
+    }
+    function onDragLeave(e: DragEvent) {
+      // 在子元素之间移动也会触发 leave，只有真正离开窗口（relatedTarget 为空）才收起
+      if (e.relatedTarget === null) setDragActive(false)
     }
     function onDrop(e: DragEvent) {
-      e.preventDefault()
       const files = e.dataTransfer?.files
       if (!files || !files.length) return
-      const paths: string[] = []
+      e.preventDefault()
+      setDragActive(false)
+      const media: File[] = []
+      const others: File[] = []
       for (const f of Array.from(files)) {
-        const fp = (f as any).path !== undefined && (f as any).path !== null && (f as any).path !== '' ? (f as any).path : f.name
-        paths.push('"' + fp + '"')
+        const tp = f.type || ''
+        if (tp.startsWith('image/') || tp.startsWith('video/')) media.push(f)
+        else others.push(f)
       }
-      inputRef.current = (inputRef.current ? inputRef.current + ' ' : '') + paths.join(' ')
-      setInput(inputRef.current)
-      inputElRef.current?.focus()
+      if (media.length) addAttachments(media)
+      if (others.length) {
+        const paths = others.map((f) => {
+          const fp = (f as any).path
+          return '"' + (fp !== undefined && fp !== null && fp !== '' ? String(fp) : f.name) + '"'
+        })
+        inputRef.current = (inputRef.current ? inputRef.current + ' ' : '') + paths.join(' ')
+        setInput(inputRef.current)
+        inputElRef.current?.focus()
+      }
+    }
+    function onPaste(e: ClipboardEvent) {
+      const items = e.clipboardData?.items
+      if (!items) return
+      const files: File[] = []
+      for (const it of Array.from(items)) {
+        if (it.kind !== 'file') continue
+        const f = it.getAsFile()
+        if (f) files.push(f)
+      }
+      // 剪贴板里没有图片/视频文件 → 不干预，走浏览器默认的文本粘贴
+      if (!files.length) return
+      // 在别的输入控件里粘贴时不劫持（例如重命名会话的输入框）
+      const t = e.target as HTMLElement | null
+      if (t && t !== inputElRef.current && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+      e.preventDefault()
+      addAttachments(files)
     }
     document.addEventListener('dragover', onDragOver)
+    document.addEventListener('dragleave', onDragLeave)
     document.addEventListener('drop', onDrop)
+    document.addEventListener('paste', onPaste)
     return () => {
       document.removeEventListener('dragover', onDragOver)
+      document.removeEventListener('dragleave', onDragLeave)
       document.removeEventListener('drop', onDrop)
+      document.removeEventListener('paste', onPaste)
     }
   }, [])
 
@@ -308,23 +363,47 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
       manualCompressCtx()
       return
     }
+    // 无文字时不要塞一个空的 text part（部分厂商会拒），直接只发附件
     const parts: MessagePart[] | undefined = pending.length
-      ? [{ type: 'text', text: text || '' }, ...pending]
+      ? [...(text ? ([{ type: 'text', text }] as MessagePart[]) : []), ...pending]
       : undefined
     setPending([])
     void sendMessage(text, parts)
   }
 
-  /** 读取用户选择的图片/视频为 data URL（沙箱内 file 对象可用，不依赖文件系统权限）。 */
-  function onPickFiles(files: FileList | null) {
-    if (!files || files.length === 0) return
-    for (const f of Array.from(files)) {
+  /** 在输入区下方显示一行临时提示（约 3.6 秒后自动消失）。 */
+  function notice(text: string) {
+    setHint(text)
+    if (hintTimer.current !== null) window.clearTimeout(hintTimer.current)
+    hintTimer.current = window.setTimeout(() => setHint(''), 3600)
+  }
+
+  /**
+   * 把 File 对象转成待发送附件 —— 点按钮 / 拖入 / 粘贴共用这一条路。
+   *
+   * 只收模型声明支持的模态（避免必然失败的请求）；被滤掉时不再静默丢弃，
+   * 而是给一行提示说明怎么开启 —— 拖进来一张图却毫无反应比报错更让人困惑。
+   */
+  function addAttachments(files: FileList | File[] | null): number {
+    if (!files) return 0
+    const list = Array.from(files)
+    if (!list.length) return 0
+    const modes = modalitiesRef.current || []
+    let added = 0
+    let skippedImage = 0
+    let skippedVideo = 0
+    for (const f of list) {
       const isImage = f.type.startsWith('image/')
       const isVideo = f.type.startsWith('video/')
       if (!isImage && !isVideo) continue
-      // 仅发送模型声明支持的模态，避免必然失败的请求
-      if (isImage && !snapshot.cfg.modalities.includes('image')) continue
-      if (isVideo && !snapshot.cfg.modalities.includes('video')) continue
+      if (isImage && modes.indexOf('image') < 0) {
+        skippedImage++
+        continue
+      }
+      if (isVideo && modes.indexOf('video') < 0) {
+        skippedVideo++
+        continue
+      }
       const reader = new FileReader()
       reader.onload = () => {
         const url = String(reader.result || '')
@@ -335,7 +414,14 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
         ])
       }
       reader.readAsDataURL(f)
+      added++
     }
+    const skipped = skippedImage + skippedVideo
+    if (skipped > 0) {
+      const kinds = [skippedImage ? '图片' : '', skippedVideo ? '视频' : ''].filter(Boolean).join('、')
+      notice(`当前模型未启用「${kinds}」模态，已忽略 ${skipped} 个文件；如需发送请在「设置 → 模型支持的模态」里勾选「${kinds}」`)
+    }
+    return added
   }
 
   function doCopyAi(m: UiMessage) {
@@ -561,6 +647,15 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
   return (
     <div className={'chat-root' + (variant === 'page' ? ' chat-root--page' : '')}>
       {variant === 'page' && historyPanel}
+      {dragActive && (
+        <div className="drop-overlay">
+          <div className="drop-overlay-box">
+            <Icon name="attach" size={22} />
+            <div className="drop-overlay-title">松开即可添加图片</div>
+            <div className="drop-overlay-sub">图片 / 视频会成为待发送附件；其它文件会插入文件路径</div>
+          </div>
+        </div>
+      )}
       <div className="chat-main">
         <header className="chat-head">
           <div className="chat-head-left">
@@ -650,7 +745,7 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                     multiple
                     hidden
                     onChange={(e) => {
-                      onPickFiles(e.target.files)
+                      addAttachments(e.target.files)
                       e.target.value = ''
                     }}
                   />
@@ -679,7 +774,7 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                     doSend()
                   }
                 }}
-                placeholder="输入消息，Enter 发送 · Shift+Enter 换行"
+                placeholder="输入消息，Enter 发送 · Shift+Enter 换行 · 可直接拖入或粘贴图片"
               />
               <button className="send-btn" type="button" onClick={doSend} disabled={!input.trim() && pending.length === 0}>
                 发送
@@ -706,7 +801,9 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                 ))}
               </div>
             )}
-            <div className="chat-hint">Enter 发送 · Shift+Enter 换行 · /compact 压缩上下文</div>
+            <div className={'chat-hint' + (hint ? ' chat-hint--alert' : '')}>
+              {hint || 'Enter 发送 · Shift+Enter 换行 · 可直接拖入或粘贴图片 · /compact 压缩上下文'}
+            </div>
           </>
         ) : snapshot.view === 'history' ? (
           <div className="chat-config">

@@ -583,6 +583,43 @@ html[data-surface='slots'] body {
   opacity: 0.75;
   user-select: none;
 }
+/* 提示行承载临时警示（例如模型未启用图片模态）时高亮 */
+.chat-hint--alert {
+  color: hsl(var(--destructive));
+  opacity: 1;
+}
+
+/* 拖入文件时的整页提示层 */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: hsl(var(--background) / 0.72);
+  pointer-events: none;
+}
+.drop-overlay-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 18px 26px;
+  border: 1.5px dashed hsl(var(--primary) / 0.85);
+  border-radius: 12px;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  box-shadow: 0 8px 24px hsl(0 0% 0% / 0.22);
+}
+.drop-overlay-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.drop-overlay-sub {
+  font-size: 10.5px;
+  color: hsl(var(--muted-foreground));
+}
 
 /* 会话内思考强度切换 */
 .effort-select {
