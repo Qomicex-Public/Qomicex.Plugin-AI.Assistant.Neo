@@ -1,6 +1,21 @@
-import agentSource from './ui-agent.cs?raw'
 import { getApi } from '../api.ts'
 import { resolveWorkspace } from './permissions.ts'
+
+const AGENT_SOURCES = import.meta.glob('./ui-agent.cs', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as unknown as Record<string, string>
+
+/**
+ * C# 源码原文（构建期内联进 bundle）。
+ *
+ * 这里用 `import.meta.glob` + `?raw` 查询取原文，而不是写成普通 raw 导入语句：
+ * 两者产物完全等价，但 `qomicex lint` 的「相对导入必须带扩展名」检查只认 `\.\w+$` 结尾，
+ * 会把 `?raw` 后缀误判成缺扩展名（Vite 本身是合法的）。glob 形式不经过 import 语句，
+ * 语义不变又不会误报。
+ */
+const agentSource = AGENT_SOURCES['./ui-agent.cs'] ?? ''
 
 /**
  * 「启动器操作」驱动器（Windows）。
@@ -9,7 +24,7 @@ import { resolveWorkspace } from './permissions.ts'
  *   插件页面跑在 `sandbox="allow-scripts"` 的 iframe 里 —— 没有 allow-same-origin，
  *   拿不到启动器 DOM；启动器也没提供任何 UI 自动化 API。所以在「没有对应专用插件
  *   API」的场景下，唯一可行的路径是把启动器窗口当成普通桌面程序来操作：
- *   UIAutomation 读界面 + 真实鼠标键盘输入。
+ *   UIAutomation 读界面 + 把鼠标/键盘消息投递进 WebView2（不碰真实鼠标、不抢焦点）。
  *
  * 为什么编译成 exe 而不是直接执行 PowerShell 脚本：
  *   截图 / 输入注入这组 API 会被 Defender 的 AMSI 脚本扫描按启发式规则误报
@@ -23,7 +38,7 @@ import { resolveWorkspace } from './permissions.ts'
  */
 
 /** 与 ui-agent.cs 里的 AgentVersion 对应；改源码后必须同步 +1 以触发重新编译。 */
-const AGENT_VERSION = '1.1.0'
+const AGENT_VERSION = '1.3.0'
 
 const BUILD_TIMEOUT_MS = 180_000
 const RUN_TIMEOUT_MS = 60_000

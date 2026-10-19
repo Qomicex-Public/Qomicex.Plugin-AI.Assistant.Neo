@@ -13,11 +13,32 @@
 // Arguments and results are UTF-8 JSON files (never the command line), which
 // keeps non-ASCII element names and input text lossless.
 //
-// While acting, the *real* mouse pointer is animated along the path so the
-// user can see what the assistant is doing instead of the UI changing by
-// itself. A separate always-on-top "virtual cursor" overlay was tried first
-// and abandoned: layered windows were occluded intermittently by the launcher
-// window, so the animation was not reliably visible.
+// While acting, the assistant draws its *own* cursor (a click-through overlay
+// owned by the launcher window) and drives the UI by posting messages straight
+// to the WebView2 render host. Neither the real mouse pointer nor the
+// foreground window is touched, so the user can keep working while the
+// assistant operates, and the assistant still works when the launcher is in
+// the background.
+//
+// An earlier version animated the real pointer with SetCursorPos and called
+// SetForegroundWindow before every action. That hijacked the user's mouse and
+// stole focus mid-keystroke, so it was replaced. Things that were learned the
+// hard way and must not be undone:
+//
+//   * The process has to be per-monitor DPI aware *before* the first UI call.
+//     A DPI-unaware process gets its posted-message coordinates virtualized by
+//     Windows, which silently shifts every click by roughly one list row.
+//   * Never post WM_UNICHAR (0x0109): it takes the WebView2 render process
+//     down. Characters go through WM_CHAR, which one WebView2 build narrowed
+//     to a single byte, so non-ASCII text uses ValuePattern instead.
+//   * Posted modifier keys do nothing useful: Chromium reads the real keyboard
+//     state, so Ctrl+A arrives as a plain "a". Anything with Ctrl/Alt/Shift
+//     needs the focus path (activate=true), which does bring the launcher
+//     forward and is therefore opt-in.
+//   * UIAutomation's Invoke on a Chromium element brings the window to the
+//     foreground as a side effect, so "auto" posts the click first and only
+//     falls back to Invoke (verified by measuring GetForegroundWindow around
+//     both paths).
 
 using System;
 using System.Collections.Generic;
@@ -50,6 +71,20 @@ namespace Qomicex.UiAgent
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
         [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, IntPtr extra);
+        [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+        [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr h, EnumProc cb, IntPtr param);
+        [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+        [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h, ref POINT p);
+        [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+        [DllImport("user32.dll")] public static extern IntPtr SetWindowLongPtr(IntPtr h, int index, IntPtr value);
+        [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int hh, uint flags);
+        [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+
+        public delegate bool EnumProc(IntPtr hwnd, IntPtr param);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct RECT { public int L, T, R, B; }
 
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT { public int X, Y; }
@@ -58,6 +93,75 @@ namespace Qomicex.UiAgent
         public const uint MOUSEEVENTF_LEFTUP = 0x0004;
         public const uint PW_RENDERFULLCONTENT = 0x00000002;
 
+        // —— 投递给 WebView2 内核的消息 ——
+        // 这些坐标是「内核窗口客户区的物理像素」：本进程是 per-monitor DPI aware，
+        // 所以 UIA 给的屏幕矩形直接 ScreenToClient 就是对的（见文件头注释）。
+        public const uint WM_MOUSEMOVE = 0x0200;
+        public const uint WM_LBUTTONDOWN = 0x0201;
+        public const uint WM_LBUTTONUP = 0x0202;
+        public const uint WM_KEYDOWN = 0x0100;
+        public const uint WM_KEYUP = 0x0101;
+        public const uint WM_CHAR = 0x0102;
+        public const int GWL_HWNDPARENT = -8;
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public const uint SWP_NOSIZE = 0x0001;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint SWP_SHOWWINDOW = 0x0040;
+
+        /// <summary>屏幕坐标 → 供鼠标/键盘消息使用的 lParam（目标窗口客户区坐标）。</summary>
+        public static IntPtr ClientLParam(IntPtr hwnd, int screenX, int screenY, out int clientX, out int clientY)
+        {
+            POINT p; p.X = screenX; p.Y = screenY;
+            ScreenToClient(hwnd, ref p);
+            clientX = p.X; clientY = p.Y;
+            return new IntPtr((p.Y << 16) | (p.X & 0xFFFF));
+        }
+
+        public static IntPtr KeyLParam(int scan = 0x1C, bool up = false)
+        {
+            int lp = (scan << 16) | 1;
+            if (up) { lp |= 1 << 30; lp |= unchecked((int)(1u << 31)); }
+            return new IntPtr(lp);
+        }
+
+        /// <summary>操作完把窗口恢复一下（最小化时点击落不到界面上）。</summary>
+        public static void EnsureRestored(IntPtr hwnd)
+        {
+            if (IsIconic(hwnd)) { ShowWindow(hwnd, 9); Thread.Sleep(160); }
+        }
+
+        /// <summary>
+        /// 把前台窗口还给 target（尽量做到）。
+        ///
+        /// 用途：Chromium 的 ValuePattern.SetValue / UIA Invoke 会在实现里调用
+        /// SetForegroundWindow，把启动器拽到前台 —— 用户正打着字就被抢走焦点。
+        /// 这两条路径都不该打断用户，所以操作一结束就用这个把前台还回去。
+        /// 后台进程直接 SetForegroundWindow 会被前台锁挡住，所以先 AttachThreadInput
+        /// 到当前前台线程（那一刻就是启动器自己的线程）再切。
+        /// </summary>
+        public static bool RestoreForeground(IntPtr target)
+        {
+            if (target == IntPtr.Zero) return false;
+            IntPtr fg = GetForegroundWindow();
+            int fgt = GetWindowThreadProcessId(fg, IntPtr.Zero);
+            int me = GetCurrentThreadId();
+            bool attached = false;
+            try
+            {
+                if (fgt != 0 && fgt != me) attached = AttachThreadInput(fgt, me, true);
+                BringWindowToTop(target);
+                SetForegroundWindow(target);
+                SetActiveWindow(target);
+            }
+            catch { }
+            finally
+            {
+                if (attached) { try { AttachThreadInput(fgt, me, false); } catch { } }
+            }
+            return GetForegroundWindow() == target;
+        }
+
         public static void RealClick()
         {
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, IntPtr.Zero);
@@ -65,10 +169,15 @@ namespace Qomicex.UiAgent
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, IntPtr.Zero);
         }
 
+        /// <summary>
+        /// 把窗口切到前台。只有「用户/模型明确要求抢焦点」的路径才该调用它
+        /// （例如带 Ctrl/Alt 的快捷键、或者模式的显式逃生舱），因为这会打断
+        /// 用户正在做的事。注意别再像以前那样无条件 SW_SHOW：窗口没最小化时
+        /// 那一下就会把它抬到最前。
+        /// </summary>
         public static bool Activate(IntPtr hwnd)
         {
             if (IsIconic(hwnd)) { ShowWindow(hwnd, 9); Thread.Sleep(140); }
-            else { ShowWindow(hwnd, 5); }
             int fg = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
             int me = GetCurrentThreadId();
             bool attached = false;
@@ -110,15 +219,195 @@ namespace Qomicex.UiAgent
         public int Nth;
     }
 
+    /// <summary>
+    /// 助手自己的光标 —— 不是系统指针。
+    ///
+    /// 背景：早期版本用 SetCursorPos + mouse_event 驱动**真实**指针，于是每次操作都会
+    /// 夺走用户的鼠标，并在动作前后抢走前台窗口。用户的要求很明确：显示进度必须是 AI
+    /// 自己的虚拟鼠标，而且不能锁定/打断用户正在做的事。所以改成在启动器窗口上盖一个
+    /// 自己的小窗口来显示位置与点击：
+    ///
+    ///   * TopMost + owner = 启动器窗口：保证盖在启动器之上。历史上"分层窗口被启动器
+    ///     遮挡"的问题就是这么解的 —— 由启动器拥有的窗口永远在 owner 之上，再叠一层
+    ///     topmost，每次移动都重打一次 HWND_TOPMOST。
+    ///   * WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW：永不抢焦点、不进 alt-tab、不占任务栏。
+    ///   * WS_EX_TRANSPARENT：鼠标事件直接穿过去，用户想点哪还点哪。
+    ///   * TransparencyKey 色键抠图：只画出箭头和点击涟漪，其余整块透明。
+    ///
+    /// 头号验收标准：用它的过程中，真实指针坐标不能变、前台窗口不能变。
+    /// </summary>
+    internal sealed class VirtualCursor : Form
+    {
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+
+        private const int Box = 72;   // 窗口边长
+        private const int TipX = 28;  // 箭头尖端在窗口内的位置（留出涟漪半径）
+        private const int TipY = 28;
+        private const float ArrowScale = 1.15f;
+
+        private static readonly Color Key = Color.FromArgb(255, 0, 255);           // 透明色键
+        private static readonly Color Fill = Color.FromArgb(255, 30, 30, 38);      // 箭头填充
+        private static readonly Color Edge = Color.FromArgb(255, 250, 250, 252);   // 箭头描边
+        private static readonly Color RippleColor = Color.FromArgb(255, 110, 160, 255);
+
+        private Point _tip;       // 箭头尖端的屏幕坐标
+        private int _ripple = -1; // -1 = 无涟漪；0..100 = 进度
+
+        public VirtualCursor(IntPtr owner, Point startScreen)
+        {
+            _tip = startScreen;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            BackColor = Key;
+            TransparencyKey = Key;
+            Size = new Size(Box, Box);
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            // 先摸一下 Handle 把窗口创建出来，再认启动器窗口当 owner。
+            IntPtr h = Handle;
+            if (owner != IntPtr.Zero)
+            {
+                try { Native.SetWindowLongPtr(h, Native.GWL_HWNDPARENT, owner); } catch { }
+            }
+        }
+
+        // 别让 Show() 抢焦点 —— 抢焦点就等于打断用户。
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+                return cp;
+            }
+        }
+
+        private void Place()
+        {
+            // 只用 SetWindowPos 移动：Form.Left/Top 会走激活逻辑。
+            Native.SetWindowPos(Handle, Native.HWND_TOPMOST,
+                _tip.X - TipX, _tip.Y - TipY, Box, Box,
+                Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
+        }
+
+        /// <summary>显示并滑到目标点。失败返回 null（拿不到光标就退化成"没有动画"，操作照做）。</summary>
+        public static VirtualCursor Begin(IntPtr owner, Point from, Point to, bool animate, int ms)
+        {
+            try
+            {
+                var c = new VirtualCursor(owner, from);
+                c.Show();
+                c.Place();
+                c.Refresh();
+                Application.DoEvents();
+                c.Glide(to, animate, ms);
+                return c;
+            }
+            catch (Exception ex) { LastError = ex.GetType().Name + ": " + ex.Message; return null; }
+        }
+
+        /// <summary>上一次 Begin() 失败的原因（诊断用；成功时为空）。</summary>
+        public static string LastError = "";
+
+        public void Glide(Point to, bool animate, int ms)
+        {
+            var from = _tip;
+            if (!animate || ms < 40 || (from.X == to.X && from.Y == to.Y))
+            {
+                _tip = to; Place(); Refresh(); Application.DoEvents(); return;
+            }
+            int steps = Math.Max(2, ms / 15);
+            for (int i = 1; i <= steps; i++)
+            {
+                double t = 1.0 - Math.Pow(1.0 - (double)i / steps, 3.0);
+                _tip = new Point(
+                    from.X + (int)Math.Round((to.X - from.X) * t),
+                    from.Y + (int)Math.Round((to.Y - from.Y) * t));
+                Place(); Refresh(); Application.DoEvents();
+                Thread.Sleep(15);
+            }
+            _tip = to; Place(); Refresh(); Application.DoEvents();
+        }
+
+        /// <summary>点一下的视觉反馈：一圈扩散的涟漪。</summary>
+        public void Ripple(int ms)
+        {
+            int steps = Math.Max(6, ms / 24);
+            for (int i = 0; i <= steps; i++)
+            {
+                _ripple = i * 100 / steps;
+                Refresh(); Application.DoEvents();
+                Thread.Sleep(24);
+            }
+            _ripple = -1; Refresh(); Application.DoEvents();
+        }
+
+        /// <summary>停一小会儿再消失，避免"闪一下就没"。</summary>
+        public void LingerAndClose(int ms)
+        {
+            try { if (ms > 0) { Thread.Sleep(ms); Application.DoEvents(); } } catch { }
+            try { Close(); } catch { }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Key);  // 涂成色键 = 透明
+            // 色键抠图不认半透明像素：这里必须关掉抗锯齿，否则边缘会留一圈洋红。
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+            if (_ripple >= 0)
+            {
+                int r = 6 + _ripple * 21 / 100;
+                using (var pen = new Pen(RippleColor, 3)) g.DrawEllipse(pen, TipX - r, TipY - r, r * 2, r * 2);
+            }
+            var pts = Arrow();
+            using (var edge = new Pen(Edge, 3.2f))
+            {
+                edge.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+                g.DrawPolygon(edge, pts);
+            }
+            using (var brush = new SolidBrush(Fill)) g.FillPolygon(brush, pts);
+        }
+
+        private static Point[] Arrow()
+        {
+            float[][] shape = {
+                new float[] { 0f, 0f },
+                new float[] { 0f, 16.5f },
+                new float[] { 3.8f, 12.8f },
+                new float[] { 6.6f, 19.6f },
+                new float[] { 9.6f, 18.2f },
+                new float[] { 6.9f, 11.6f },
+                new float[] { 11.6f, 11.6f }
+            };
+            var pts = new Point[shape.Length];
+            for (int i = 0; i < shape.Length; i++)
+            {
+                pts[i] = new Point(
+                    TipX + (int)Math.Round(shape[i][0] * ArrowScale),
+                    TipY + (int)Math.Round(shape[i][1] * ArrowScale));
+            }
+            return pts;
+        }
+    }
+
     internal static class Program
     {
-        private const string AgentVersion = "1.2.0";
+        private const string AgentVersion = "1.3.0";
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
         private static Dictionary<string, object> _a = new Dictionary<string, object>();
         private static readonly Dictionary<string, object> _res = new Dictionary<string, object>();
         private static string _outPath;
         private static string _statePath;
         private static List<string> _lastNames = new List<string>();
+        // 虚拟光标上次停留的屏幕坐标（持久化，跨进程延续动画）。
+        private static int _cursorX = int.MinValue;
+        private static int _cursorY = int.MinValue;
 
         // Short-ref registry.
         //
@@ -143,6 +432,10 @@ namespace Qomicex.UiAgent
         [STAThread]
         private static int Main(string[] rawArgs)
         {
+            // DPI 感知要在任何界面调用之前设定好：投递坐标是按「渲染宿主客户区的物理像素」
+            // 算的，进程一旦不是 DPI 感知，Windows 会把坐标虚拟化，点击就整体偏一个条目。
+            // per-monitor v2 (-4) 优先，老系统回退到 system aware。
+            try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
             try { Native.SetProcessDPIAware(); } catch { }
             Application.EnableVisualStyles();
 
@@ -321,6 +614,20 @@ namespace Qomicex.UiAgent
                         }
                     }
                 }
+                // 上次虚拟光标停在哪：跨进程（每次操作都是新进程）延续动画，看起来才连贯。
+                if (s.TryGetValue("cursor", out v) && v != null)
+                {
+                    var arr = v as object[];
+                    if (arr != null && arr.Length == 2)
+                    {
+                        try
+                        {
+                            _cursorX = Convert.ToInt32(arr[0], CultureInfo.InvariantCulture);
+                            _cursorY = Convert.ToInt32(arr[1], CultureInfo.InvariantCulture);
+                        }
+                        catch { }
+                    }
+                }
             }
             catch { }
         }
@@ -345,6 +652,8 @@ namespace Qomicex.UiAgent
                     if (_refMap.TryGetValue(id, out payload)) refs.Add(payload);
                 }
                 d["refs"] = refs.ToArray();
+                if (_cursorX != int.MinValue && _cursorY != int.MinValue)
+                    d["cursor"] = new[] { _cursorX, _cursorY };
                 string dir = Path.GetDirectoryName(_statePath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
                 File.WriteAllText(_statePath, Json.Serialize(d), new UTF8Encoding(false));
@@ -694,6 +1003,166 @@ namespace Qomicex.UiAgent
             Native.SetCursorPos(toX, toY);
         }
 
+        // ---------------- posted input (不动真实指针 / 不抢焦点) ----------------
+
+        /// <summary>虚拟光标起点：上次停的位置；没有就取启动器窗口中心。</summary>
+        private static Point CursorStart()
+        {
+            if (_cursorX != int.MinValue && _cursorY != int.MinValue)
+                return new Point(_cursorX, _cursorY);
+            try
+            {
+                var win = TargetWindow();
+                return new Point((int)(win.Rect.X + win.Rect.Width / 2), (int)(win.Rect.Y + win.Rect.Height / 2));
+            }
+            catch { return new Point(0, 0); }
+        }
+
+        private static void RememberCursor(int x, int y)
+        {
+            _cursorX = x; _cursorY = y;
+        }
+
+        /// <summary>
+        /// 如果某次操作把启动器窗口意外拽到了前台，就把前台还给用户原来那个窗口。
+        /// 返回 true 表示「确实被抢了、而且成功还回去了」。
+        /// </summary>
+        private static bool UndoFocusSteal(IntPtr winHandle, IntPtr prevFg)
+        {
+            if (prevFg == IntPtr.Zero || prevFg == winHandle) return false;
+            if (Native.GetForegroundWindow() != winHandle) return false;
+            bool ok = Native.RestoreForeground(prevFg);
+            if (ok) Thread.Sleep(60);
+            return ok;
+        }
+
+        /// <summary>
+        /// 找 WebView2 的渲染宿主窗口。鼠标消息必须投给它：Chromium 只有在这个窗口上
+        /// 收到的按键消息才会做命中测试并派发给页面（投给 Chrome_WidgetWin_* 没用）。
+        /// </summary>
+        private static IntPtr RenderHost(IntPtr launcher)
+        {
+            IntPtr found = IntPtr.Zero;
+            try
+            {
+                Native.EnumChildWindows(launcher, delegate(IntPtr child, IntPtr param)
+                {
+                    var sb = new StringBuilder(256);
+                    if (Native.GetClassName(child, sb, sb.Capacity) > 0 &&
+                        string.Equals(sb.ToString(), "Chrome_RenderWidgetHostHWND", StringComparison.Ordinal))
+                    {
+                        found = child;
+                        return false;
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+            return found;
+        }
+
+        /// <summary>
+        /// 把一次点击"投递"进网页：不移动真实指针、不改变前台窗口。
+        /// 序列 WM_MOUSEMOVE → WM_LBUTTONDOWN → WM_LBUTTONUP；坐标是渲染宿主客户区的
+        /// 物理像素（本进程 DPI 感知，所以 UIA 的屏幕矩形直接 ScreenToClient 就对）。
+        /// </summary>
+        private static bool PostClick(IntPtr launcher, int screenX, int screenY, out string detail)
+        {
+            detail = "";
+            var host = RenderHost(launcher);
+            if (host == IntPtr.Zero) { detail = "render host window not found"; return false; }
+
+            int cx, cy;
+            IntPtr lp = Native.ClientLParam(host, screenX, screenY, out cx, out cy);
+            Native.RECT cr;
+            if (!Native.GetClientRect(host, out cr)) { detail = "GetClientRect failed"; return false; }
+            if (cx < 0 || cy < 0 || cx >= cr.R - cr.L || cy >= cr.B - cr.T)
+            {
+                detail = "target is outside the web view (client " + cx + "," + cy + ")";
+                return false;
+            }
+
+            Native.PostMessage(host, Native.WM_MOUSEMOVE, IntPtr.Zero, lp);
+            Thread.Sleep(40);
+            Native.PostMessage(host, Native.WM_LBUTTONDOWN, new IntPtr(1), lp);
+            Thread.Sleep(60);
+            Native.PostMessage(host, Native.WM_LBUTTONUP, IntPtr.Zero, lp);
+            detail = "client " + cx + "," + cy;
+            return true;
+        }
+
+        /// <summary>SendKeys 语法里出现修饰键前缀（^ % +）就必须走真实键盘。</summary>
+        private static bool HasModifier(string keys)
+        {
+            return keys.IndexOf('^') >= 0 || keys.IndexOf('%') >= 0 || keys.IndexOf('+') >= 0;
+        }
+
+        private static readonly Dictionary<string, int> VkMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "ENTER", 0x0D }, { "RETURN", 0x0D }, { "TAB", 0x09 }, { "ESC", 0x1B }, { "ESCAPE", 0x1B },
+            { "SPACE", 0x20 }, { "BACKSPACE", 0x08 }, { "BS", 0x08 }, { "DELETE", 0x2E }, { "DEL", 0x2E },
+            { "INSERT", 0x2D }, { "INS", 0x2D }, { "HOME", 0x24 }, { "END", 0x23 },
+            { "PGUP", 0x21 }, { "PGDN", 0x22 }, { "UP", 0x26 }, { "DOWN", 0x28 }, { "LEFT", 0x25 }, { "RIGHT", 0x27 },
+            { "F1", 0x70 }, { "F2", 0x71 }, { "F3", 0x72 }, { "F4", 0x73 }, { "F5", 0x74 }, { "F6", 0x75 },
+            { "F7", 0x76 }, { "F8", 0x77 }, { "F9", 0x78 }, { "F10", 0x79 }, { "F11", 0x7A }, { "F12", 0x7B }
+        };
+
+        /// <summary>
+        /// 把 SendKeys 风格的按键串拆开、逐键投递给渲染宿主。只处理普通键
+        /// （{ENTER}/{TAB}/{ESC}/方向键/F1-F12 以及单个 ASCII 字符）；遇到不认识的记号、
+        /// 非 ASCII 字符或修饰键就返回 false，由调用方决定是否退到抢焦点路径。
+        /// 绝不投 WM_UNICHAR：那个消息会把 WebView2 渲染进程搞崩（实测踩过）。
+        /// </summary>
+        private static bool PostKeys(IntPtr launcher, string keys, out int sent, out string unsupported)
+        {
+            sent = 0; unsupported = "";
+            var host = RenderHost(launcher);
+            if (host == IntPtr.Zero) { unsupported = "the render host window"; return false; }
+
+            int i = 0;
+            while (i < keys.Length)
+            {
+                char ch = keys[i];
+                if (ch == '{')
+                {
+                    int close = keys.IndexOf('}', i + 1);
+                    if (close < 0) { unsupported = "{ without }"; return false; }
+                    string token = keys.Substring(i + 1, close - i - 1).Trim();
+                    i = close + 1;
+                    int repeat = 1;
+                    int sp = token.IndexOf(' ');
+                    if (sp > 0)
+                    {
+                        int.TryParse(token.Substring(sp + 1).Trim(), out repeat);
+                        token = token.Substring(0, sp).Trim();
+                    }
+                    if (repeat < 1) repeat = 1;
+                    int vk;
+                    if (!VkMap.TryGetValue(token, out vk)) { unsupported = "\"" + token + "\""; return false; }
+                    for (int n = 0; n < repeat; n++)
+                    {
+                        Native.PostMessage(host, Native.WM_KEYDOWN, new IntPtr(vk), Native.KeyLParam(vk));
+                        Thread.Sleep(28);
+                        Native.PostMessage(host, Native.WM_KEYUP, new IntPtr(vk), Native.KeyLParam(vk, true));
+                        Thread.Sleep(28);
+                        sent++;
+                    }
+                    continue;
+                }
+                if (ch >= 32 && ch < 127)
+                {
+                    Native.PostMessage(host, Native.WM_CHAR, new IntPtr(ch), Native.KeyLParam());
+                    Thread.Sleep(28);
+                    sent++;
+                    i++;
+                    continue;
+                }
+                unsupported = "\"" + ch + "\"";
+                return false;
+            }
+            return true;
+        }
+
         // ---------------- actions ----------------
 
         private static void ActionFocus()
@@ -828,12 +1297,14 @@ namespace Qomicex.UiAgent
             var root = WebRoot(win, AInt("timeoutMs", 6000));
             if (root == null) throw new AgentException("could not locate the web content of the launcher window", "E_NO_ROOT");
 
+            Native.EnsureRestored(win.Handle);
             bool animate = ABool("animate", true);
+            int moveMs = AInt("moveMs", 420);
             string refStr = AStr("ref", "");
-            int px, py;
-            string mode = AStr("mode", "mouse");
+            string mode = AStr("mode", "auto");
             AutomationElement el = null;
             Dictionary<string, object> target = null;
+            int px, py;
 
             if (!string.IsNullOrEmpty(refStr))
             {
@@ -842,6 +1313,7 @@ namespace Qomicex.UiAgent
                 var c = el.Current;
                 var r = c.BoundingRectangle;
                 if (r.IsEmpty) throw new AgentException("the target element has no visible area; it may be scrolled out of view", "E_NO_RECT");
+                // 必须现取矩形：侧栏能滚动，用快照时的旧坐标会偏一个条目（实测 58px）。
                 px = (int)(r.X + r.Width / 2);
                 py = (int)(r.Y + r.Height / 2);
                 target = new Dictionary<string, object> {
@@ -855,34 +1327,87 @@ namespace Qomicex.UiAgent
                 px = AInt("x", int.MinValue);
                 py = AInt("y", int.MinValue);
                 if (px == int.MinValue || py == int.MinValue) throw new AgentException("either ref or x/y is required", "E_ARGS");
-                mode = "mouse";
+                if (mode == "auto" || mode == "invoke") mode = "post";   // 只有坐标，没有元素可以 invoke
             }
 
             var before = new List<string>(_lastNames);
-            Native.Activate(win.Handle);
-            _res["foreground"] = Native.GetForegroundWindow() == win.Handle;
+            IntPtr prevFg = Native.GetForegroundWindow();
+            VirtualCursor.LastError = "";
+            var cursor = VirtualCursor.Begin(win.Handle, CursorStart(), new Point(px, py), animate, moveMs);
+            string cursorErr = cursor == null ? VirtualCursor.LastError : "";
 
-            MovePointer(px, py, AInt("moveMs", 420), animate);
+            string method = "";
+            string note = "";
+            bool clicked = false;
 
-            bool invoked = false;
-            if (mode == "invoke" && el != null)
+            // 顺序很关键：实测 Chromium 的 UIA Invoke 会把启动器窗口**激活到前台**（抢焦点），
+            // 而投递点击只影响网页内部 —— 前台窗口、真实指针都不动。所以默认（auto）先投递，
+            // invoke 只当兜底（元素滚出可视区、投递被拒时）。
+            bool tryPost = mode == "auto" || mode == "post";
+            bool tryInvoke = mode == "auto" || mode == "invoke";
+
+            if (tryPost)
+            {
+                string detail;
+                if (PostClick(win.Handle, px, py, out detail)) { method = "post"; clicked = true; }
+                note = detail;
+            }
+
+            if (!clicked && tryInvoke && el != null)
             {
                 object p;
                 if (TryPattern(el, InvokePattern.Pattern, out p))
                 {
-                    try { ((InvokePattern)p).Invoke(); invoked = true; }
-                    catch { invoked = false; }
+                    try
+                    {
+                        ((InvokePattern)p).Invoke();
+                        method = "invoke";
+                        clicked = true;
+                        note += "; fell back to UIAutomation Invoke, which can bring the window to the foreground";
+                    }
+                    catch (Exception ex) { note += "; invoke raised: " + ex.Message; }
                 }
             }
-            // click at the animated position so the press happens where the user
-            // just watched the pointer travel to
-            Native.SetCursorPos(px, py);
-            if (!invoked) Native.RealClick();
 
+            // invoke 会把启动器拽到前台（Chromium 内部调了 SetForegroundWindow）：
+            // 既然默认路径承诺「不打断用户」，这里把前台还回去。
+            bool restoredFg = false;
+            if (clicked && method == "invoke") restoredFg = UndoFocusSteal(win.Handle, prevFg);
+
+            // 3) 显式逃生舱：真的动系统指针。会打断用户，所以只能由模型/用户显式指定。
+            if (!clicked && mode == "mouse")
+            {
+                Native.Activate(win.Handle);
+                MovePointer(px, py, moveMs, animate);
+                Native.SetCursorPos(px, py);
+                Native.RealClick();
+                method = "mouse";
+                clicked = true;
+                note = "real pointer moved and the window was brought to the foreground";
+            }
+
+            if (!clicked)
+            {
+                if (cursor != null) cursor.LingerAndClose(60);
+                throw new AgentException(
+                    "could not click the target: no usable UIA pattern and the posted click was rejected (" + note +
+                    "). Take a fresh snapshot and retry, or pass mode=\"mouse\" to fall back to the real pointer.",
+                    "E_CLICK_FAILED");
+            }
+
+            if (cursor != null) cursor.Ripple(300);
             Thread.Sleep(AInt("settleMs", 420));
+            if (cursor != null) cursor.LingerAndClose(140);
+
+            RememberCursor(px, py);
             _res["ok"] = true;
-            _res["method"] = invoked ? "invoke" : "mouse";
+            _res["method"] = method;
             _res["point"] = new[] { px, py };
+            _res["activated"] = method == "mouse";
+            _res["restoredForeground"] = restoredFg;
+            _res["cursorShown"] = cursor != null;
+            if (cursorErr.Length > 0) _res["cursorError"] = cursorErr;
+            if (!string.IsNullOrEmpty(note)) _res["note"] = note;
             if (target != null) _res["target"] = target;
             var after = Signature(root);
             _res["diff"] = BuildDiff(before, after.names);
@@ -897,15 +1422,18 @@ namespace Qomicex.UiAgent
             if (root == null) throw new AgentException("could not locate the web content of the launcher window", "E_NO_ROOT");
 
             string text = AStr("text", "");
-            if (string.IsNullOrEmpty(text)) throw new AgentException("text is required", "E_ARGS");
             string refStr = AStr("ref", "");
             bool clear = ABool("clear", true);
+            bool activate = ABool("activate", false);
             bool animate = ABool("animate", true);
+            int moveMs = AInt("moveMs", 360);
+            // 空文本 + clear=true 表示「只清空」（搜索框、表单里很常用的一个动作）。
+            if (string.IsNullOrEmpty(text) && !clear) throw new AgentException("text is required (pass clear=true with empty text to just clear the field)", "E_ARGS");
 
-            Native.Activate(win.Handle);
+            Native.EnsureRestored(win.Handle);
 
-            int px = -1, py = -1;
             AutomationElement el = null;
+            int px = -1, py = -1;
             if (!string.IsNullOrEmpty(refStr))
             {
                 el = Resolve(root, refStr);
@@ -921,13 +1449,68 @@ namespace Qomicex.UiAgent
                     { "type", c.ControlType.ProgrammaticName.Replace("ControlType.", "") },
                     { "name", (c.Name ?? "").Trim() }
                 };
-                MovePointer(px, py, AInt("moveMs", 360), animate);
-                if (px >= 0)
+            }
+            else if (!activate)
+            {
+                throw new AgentException("typing without a ref writes to whatever currently has focus, which only makes sense when the launcher is allowed to take focus: pass activate=true, or pass a ref so the value can be written without touching focus.", "E_NEEDS_ACTIVATE");
+            }
+
+            var before = new List<string>(_lastNames);
+            var cursor = px >= 0 ? VirtualCursor.Begin(win.Handle, CursorStart(), new Point(px, py), animate, moveMs) : null;
+
+            // 首选 ValuePattern.SetValue：不抢焦点、不碰剪贴板、Unicode 安全。
+            // （WM_CHAR 对非 ASCII 会按低字节截断，SendKeys 根本不支持 CJK，而 WebView2
+            //   里的 React 受控输入框实测认 SetValue 并会真的更新组件状态。）
+            object vpObj;
+            if (el != null && TryPattern(el, ValuePattern.Pattern, out vpObj))
+            {
+                try
                 {
-                    Native.SetCursorPos(px, py);
-                    Native.RealClick();
+                    var vp = (ValuePattern)vpObj;
+                    if (!vp.Current.IsReadOnly)
+                    {
+                        IntPtr prevFg = Native.GetForegroundWindow();
+                        vp.SetValue(clear ? text : (ElementValue(el) + text));
+                        // 实测：Chromium 的 ValuePattern.SetValue 会顺手把启动器窗口拽到前台
+                        // （它内部调了 SetForegroundWindow）。用户的要求是「不打断」，所以
+                        // 立刻把前台还给原来那个窗口。
+                        bool restoredFg = UndoFocusSteal(win.Handle, prevFg);
+                        if (cursor != null) { cursor.Ripple(300); cursor.LingerAndClose(140); }
+                        Thread.Sleep(AInt("settleMs", 320));
+                        RememberCursor(px, py);
+                        _res["ok"] = true;
+                        _res["method"] = "setValue";
+                        _res["typed"] = text.Length;
+                        _res["focused"] = false;
+                        _res["restoredForeground"] = restoredFg;
+                        _res["valueAfter"] = ElementValue(el);
+                        var afterV = Signature(root);
+                        _res["elementCount"] = afterV.count;
+                        SaveSignature(afterV);
+                        return;
+                    }
                 }
-                else { try { el.SetFocus(); } catch { } }
+                catch { }
+            }
+
+            if (!activate)
+            {
+                if (cursor != null) cursor.LingerAndClose(60);
+                throw new AgentException("this control cannot be written without focus (it exposes no writable ValuePattern), so typing it needs activate=true — that brings the launcher to the foreground for a moment.", "E_NEEDS_ACTIVATE");
+            }
+
+            // 明确要求抢焦点时的兜底：切前台 → 投递点击让网页里的元素获得焦点 →
+            // 剪贴板粘贴（Unicode 安全）。仍然不动真实指针。
+            Native.Activate(win.Handle);
+            if (px >= 0)
+            {
+                string detail;
+                PostClick(win.Handle, px, py, out detail);
+                Thread.Sleep(180);
+            }
+            else
+            {
+                try { el.SetFocus(); } catch { }
                 Thread.Sleep(160);
             }
 
@@ -983,8 +1566,11 @@ namespace Qomicex.UiAgent
                 }
             }
 
+            if (cursor != null) { cursor.Ripple(280); cursor.LingerAndClose(140); }
+            RememberCursor(px, py);
             _res["ok"] = true;
             _res["typed"] = text.Length;
+            _res["focused"] = true;
             if (el != null) _res["valueAfter"] = ElementValue(el);
             var after = Signature(root);
             _res["elementCount"] = after.count;
@@ -994,36 +1580,72 @@ namespace Qomicex.UiAgent
         private static void ActionKeys()
         {
             var win = TargetWindow();
-            Native.Activate(win.Handle);
             string keys = AStr("keys", "");
             if (string.IsNullOrEmpty(keys)) throw new AgentException("keys is required", "E_ARGS");
             string refStr = AStr("ref", "");
+            bool activate = ABool("activate", false);
             bool animate = ABool("animate", true);
+            int moveMs = AInt("moveMs", 320);
 
+            Native.EnsureRestored(win.Handle);
+
+            AutomationElement el = null;
+            int px = -1, py = -1;
             if (!string.IsNullOrEmpty(refStr))
             {
                 var root = WebRoot(win, 3000);
-                if (root != null)
+                if (root == null) throw new AgentException("could not locate the web content of the launcher window", "E_NO_ROOT");
+                el = Resolve(root, refStr);
+                if (el == null) throw new AgentException("ref is unknown or expired; refs are only valid while the UI is unchanged, so call UiSnapshot again and retry with a fresh ref", "E_STALE_REF");
+                var r = el.Current.BoundingRectangle;
+                if (!r.IsEmpty)
                 {
-                    var el = Resolve(root, refStr);
-                    if (el == null) throw new AgentException("ref is unknown or expired; refs are only valid while the UI is unchanged, so call UiSnapshot again and retry with a fresh ref", "E_STALE_REF");
-                    var r = el.Current.BoundingRectangle;
-                    if (!r.IsEmpty)
-                    {
-                        int px = (int)(r.X + r.Width / 2);
-                        int py = (int)(r.Y + r.Height / 2);
-                        MovePointer(px, py, AInt("moveMs", 320), animate);
-                        Native.SetCursorPos(px, py);
-                        Native.RealClick();
-                        Thread.Sleep(140);
-                    }
+                    px = (int)(r.X + r.Width / 2);
+                    py = (int)(r.Y + r.Height / 2);
                 }
             }
 
+            var cursor = px >= 0 ? VirtualCursor.Begin(win.Handle, CursorStart(), new Point(px, py), animate, moveMs) : null;
+
+            // 先给网页内部焦点：投递一次点击。这一步同样不动真实指针、不改前台窗口。
+            if (px >= 0)
+            {
+                string detail;
+                PostClick(win.Handle, px, py, out detail);
+                Thread.Sleep(160);
+            }
+
+            if (!activate)
+            {
+                // 普通键可以无焦点投递（{ENTER}/{TAB}/{ESC}/方向键/单个 ASCII 字符）。
+                if (!HasModifier(keys))
+                {
+                    int sent;
+                    string unsupported;
+                    if (PostKeys(win.Handle, keys, out sent, out unsupported))
+                    {
+                        if (cursor != null) { cursor.Ripple(260); cursor.LingerAndClose(140); }
+                        Thread.Sleep(AInt("settleMs", 260));
+                        _res["ok"] = true;
+                        _res["method"] = "post";
+                        _res["sent"] = keys;
+                        _res["keys"] = sent;
+                        return;
+                    }
+                    if (cursor != null) cursor.LingerAndClose(60);
+                    throw new AgentException("cannot post " + unsupported + " to the web view. Only {ENTER}/{TAB}/{ESC}/{BACKSPACE}/{DELETE}/{HOME}/{END}/{PGUP}/{PGDN}/{UP}/{DOWN}/{LEFT}/{RIGHT}/F1-F12 and single ASCII characters can be sent without focus; pass activate=true to use the real keyboard (that brings the launcher to the foreground).", "E_NEEDS_ACTIVATE");
+                }
+                if (cursor != null) cursor.LingerAndClose(60);
+                throw new AgentException("key combination \"" + keys + "\" uses Ctrl/Alt/Shift, which WebView2 ignores when posted (Ctrl+A arrives as a plain \"a\"). Pass activate=true, which brings the launcher to the foreground and sends the keys through the real keyboard.", "E_NEEDS_ACTIVATE");
+            }
+
+            Native.Activate(win.Handle);
             SendKeys.SendWait(keys);
-            _res["ok"] = true;
-            _res["sent"] = keys;
+            if (cursor != null) { cursor.Ripple(260); cursor.LingerAndClose(140); }
             Thread.Sleep(AInt("settleMs", 260));
+            _res["ok"] = true;
+            _res["method"] = "sendKeys";
+            _res["sent"] = keys;
         }
 
         private static void ActionScreenshot(string shotPath)

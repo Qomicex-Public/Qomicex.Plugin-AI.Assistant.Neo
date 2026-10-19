@@ -497,7 +497,7 @@ async function buildSystemPrompt(): Promise<string> {
  * —— 比让模型调用后再吃一个「未开启」的拒绝更省 token，也更不容易让它误判能力边界。
  *
  * 两个额外过滤：
- *   - 非 Windows 不提供（驱动依赖 UIAutomation + 真实鼠标键盘）。
+ *   - 非 Windows 不提供（驱动依赖 UIAutomation + Win32 消息投递）。
  *   - 模型没声明 image 模态时不提供 UiScreenshot：截了也没法看，纯浪费一次抓屏。
  */
 function getActiveToolDefs(): typeof toolDefs {
