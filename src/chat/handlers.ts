@@ -270,7 +270,11 @@ function uiFail(r: AgentResult): { error: string; __ui_text: string } {
         ? '（没找到启动器窗口，请确认启动器正在运行）'
         : code === 'E_NO_ROOT'
           ? '（无法定位启动器网页内容；可先 UiFocus 激活窗口再重试）'
-          : ''
+          : code === 'E_NEEDS_ACTIVATE'
+            ? '（这个控件/组合键没法在不抢焦点的情况下操作。确实必要时再显式传 activate=true —— 那会把启动器切到前台、短暂打断用户）'
+            : code === 'E_CLICK_FAILED'
+              ? '（既没有可用的 UIAutomation 调用，投递的点击也被拒了。重新 UiSnapshot 取新 ref 重试；仍不行再考虑 mode="mouse"）'
+              : ''
   const msg = `${r.error || '界面操作失败'}${hint}`
   return { error: msg, __ui_text: `ERROR[${code}] ${msg}` }
 }
@@ -784,11 +788,12 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
     const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
     const hasXY = a.x !== undefined && a.y !== undefined && Number.isFinite(Number(a.x)) && Number.isFinite(Number(a.y))
     if (!ref && !hasXY) return { error: '需要 ref（来自 UiSnapshot）或 x/y 屏幕坐标' }
+    const mode = a.mode === 'invoke' || a.mode === 'post' || a.mode === 'mouse' ? a.mode : 'auto'
     const r = await runAgent('click', {
       ref: ref || undefined,
       x: hasXY ? Math.round(Number(a.x)) : undefined,
       y: hasXY ? Math.round(Number(a.y)) : undefined,
-      mode: a.mode === 'invoke' ? 'invoke' : 'mouse',
+      mode,
       moveMs: clampInt(a.moveMs, 420, 0, 5000),
     })
     if (r.ok === false) return uiFail(r)
@@ -803,11 +808,18 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
       ok: true,
       method: r.method,
       point: r.point,
-      foreground: r.foreground,
+      activated: r.activated === true,
+      restoredForeground: r.restoredForeground === true,
       diff: r.diff,
       __ui_summary: `已点击 ${what}`,
       __ui_text:
-        `已点击 ${what}（方式 ${r.method}${r.foreground === false ? '；注意：窗口未在前台，操作可能未生效' : ''}）。` +
+        `已点击 ${what}（方式 ${r.method}${
+          r.activated === true
+            ? '；注意：这一步移动了真实鼠标/抢了前台'
+            : r.restoredForeground === true
+              ? '；这一步被 Chromium 带到了前台，已立刻把前台还原给用户'
+              : '；未移动用户的鼠标、未抢前台'
+        }）。` +
         `界面变化：新增 ${d.addedCount ?? 0} / 消失 ${d.removedCount ?? 0}${appeared}`,
     }
   },
@@ -816,23 +828,35 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
     const deny = uiGate()
     if (deny) return deny
     const text = a.text === undefined || a.text === null ? '' : String(a.text)
-    if (!text) return { error: 'text 必填' }
+    const clear = a.clear !== false
+    // 空文本 + clear=true = 只清空输入框
+    if (!text && !clear) return { error: 'text 必填（只想清空请留空 text 并保持 clear=true）' }
     const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
     const r = await runAgent('type', {
       text,
       ref: ref || undefined,
-      clear: a.clear !== false,
+      clear,
+      activate: a.activate === true,
       moveMs: clampInt(a.moveMs, 360, 0, 5000),
     })
     if (r.ok === false) return uiFail(r)
     const target = r.target ? `${r.target.type} "${short(r.target.name, 40)}"` : '当前焦点控件'
+    const n = r.typed ?? text.length
     return {
       ok: true,
       method: r.method,
       valueAfter: r.valueAfter,
-      __ui_summary: `已输入 ${r.typed ?? text.length} 个字符`,
+      restoredForeground: r.restoredForeground === true,
+      __ui_summary: n ? `已输入 ${n} 个字符` : '已清空输入框',
       __ui_text:
-        `已向 ${target} 输入 ${r.typed ?? text.length} 个字符（方式 ${r.method}）。` +
+        (n ? `已向 ${target} 输入 ${n} 个字符` : `已清空 ${target}`) +
+        `（方式 ${r.method}${
+          r.focused === true
+            ? '；这一步抢了前台'
+            : r.restoredForeground === true
+              ? '；Chromium 写值时曾把启动器带到前台，已立刻把前台还原给用户'
+              : '；未抢焦点、未动鼠标'
+        }）。` +
         (r.valueAfter !== undefined ? `输入后该控件值为 "${short(r.valueAfter, 60)}"。` : '') +
         (r.pasteError ? `注意：剪贴板粘贴失败（${short(r.pasteError, 80)}），已降级为直接赋值，部分控件可能不接受。` : ''),
     }
@@ -844,13 +868,21 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
     const keys = a.keys === undefined || a.keys === null ? '' : String(a.keys)
     if (!keys) return { error: 'keys 必填，例如 "{ENTER}"、"{TAB}"、"^s"' }
     const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
-    const r = await runAgent('keys', { keys, ref: ref || undefined, moveMs: clampInt(a.moveMs, 320, 0, 5000) })
+    const r = await runAgent('keys', {
+      keys,
+      ref: ref || undefined,
+      activate: a.activate === true,
+      moveMs: clampInt(a.moveMs, 320, 0, 5000),
+    })
     if (r.ok === false) return uiFail(r)
     return {
       ok: true,
       sent: r.sent,
+      method: r.method,
       __ui_summary: `已发送按键 ${keys}`,
-      __ui_text: `已向启动器发送按键 ${r.sent ?? keys}。如需确认效果，请再用 UiSnapshot 或 UiScreenshot 复查。`,
+      __ui_text:
+        `已向启动器发送按键 ${r.sent ?? keys}（方式 ${r.method === 'post' ? '无焦点投递，未打断用户' : '真实键盘，已抢前台'}）。` +
+        '如需确认效果，请再用 UiSnapshot 或 UiScreenshot 复查。',
     }
   },
 
