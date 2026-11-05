@@ -511,9 +511,9 @@ async function buildSystemPrompt(): Promise<string> {
   const perm = state.permissionOverride ?? state.filePermission
   const permText =
     perm === 'readonly'
-      ? '只读：只能用 Read / Grep / GetProcessLogs，禁止 Write / Edit / Bash / RunProcess / StopProcess / Compress / Decompress。'
+      ? '只读：只能用 Read / Grep / GetProcessLogs，禁止 Write / Edit / Bash / RunProcess / StopProcess / DownloadFile / Compress / Decompress。'
       : perm === 'write'
-        ? '可写：Read / Write / Edit / Grep / Bash / RunProcess / GetProcessLogs / StopProcess / Compress / Decompress 均可用；首次访问未授权目录时启动器会弹窗要用户授权。'
+        ? '可写：Read / Write / Edit / Grep / Bash / RunProcess / GetProcessLogs / StopProcess / DownloadFile / Compress / Decompress 均可用；首次访问未授权目录时启动器会弹窗要用户授权。'
         : '完全访问：所有文件与命令工具均可用，不再逐一确认。仍应避免破坏性操作。'
   // 界面操作章节只在开关打开时给：没开就不提，模型才不会以为自己能点界面
   const uiText = state.uiControl && isWindowsPlatform() ? `\n${UI_CONTROL_PROMPT}` : ''

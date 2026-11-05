@@ -28,6 +28,29 @@ version: 1
 
 > 下载的汉化包要核对：MC 版本、加载器、模组版本、覆盖范围、来源可信度。不要运行不明 `.exe/.bat`。
 
+### 1.1 下载候选包（DownloadFile）
+
+`DownloadFile` 是通用下载工具（底层 `download.addTask`），不要把网页当文件直接 `fetchWeb`：
+
+1. 先拿**直链**：
+   - Modrinth/CurseForge：`getVersionDownloads` 的 `url`；
+   - GitHub Releases：`browser_download_url`（不是仓库页面）；
+   - 网盘/论坛：用 `fetchWeb` 找实际文件地址，必要时从页面/接口解析。
+2. 先下到临时工作区检查：
+
+```text
+DownloadFile({
+  url: "<直链>",
+  targetPath: "<临时工作区>\\downloads\\xxx-zh_cn.zip"
+})
+```
+
+3. `getDownloadProgress(taskId)` 轮询到 `completed`；再 `tar -tf`（zip）或 `Decompress` 检查目录结构。
+4. 确认是资源包/语言文件后再安装：`DownloadFile({ url, instanceId, category: "resourcepacks", fileName })`，或把检查过的文件夹复制到 `resourcepacks/`。
+5. 需要鉴权/防盗链时传 `headers`（Authorization / Referer / Cookie）；`.zip` 想直接解压可传 `extract: true`（会删除原 zip）。
+
+> 注意：`DownloadFile` 需要「可写」及以上权限；下载大文件用 `getDownloadProgress` 按 15 秒间隔轮询。
+
 ## 2. 提取源 lang
 
 ### 2.1 先看 jar 里有什么

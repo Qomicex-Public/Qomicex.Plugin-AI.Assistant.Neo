@@ -166,7 +166,10 @@ export const toolDefs: ToolDef[] = [
     type: 'function',
     function: {
       name: 'startDownload',
-      description: '下载资源到指定实例。先用 searchResources→getResourceVersions→getVersionDownloads 拿下载链接，再用本工具下载；getDownloadProgress 可查进度',
+      description:
+        '下载资源到指定实例的目录（category：mods/resourcepacks/shaderpacks/datapacks 等）。' +
+        '先用 searchResources→getResourceVersions→getVersionDownloads 拿下载链接；' +
+        '需要下载到临时工作区、检查压缩包内容、带自定义 headers 或自动解压时，改用 DownloadFile。getDownloadProgress 可查进度',
       parameters: {
         type: 'object',
         properties: {
@@ -176,6 +179,29 @@ export const toolDefs: ToolDef[] = [
           category: { type: 'string', description: '类别：mods/resourcepacks/shaderpacks/datapacks/saves' },
         },
         required: ['instanceId', 'url', 'fileName', 'category'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'DownloadFile',
+      description:
+        '下载任意文件到磁盘（资源包/汉化包/整合包/压缩包等），返回 taskId，用 getDownloadProgress 轮询。' +
+        '目标二选一：targetPath（绝对文件路径，推荐先下到临时工作区检查内容）；或 instanceId + category（如 resourcepacks / mods / shaderpacks）。' +
+        '支持 headers（Authorization/Referer/Cookie）与 extract（仅 .zip：下载后自动解压到目标目录并删除 zip）。需要权限：可写及以上。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: '直链 URL（http/https）' },
+          targetPath: { type: 'string', description: '绝对文件路径（含文件名）。与 instanceId 二选一，优先使用' },
+          instanceId: { type: 'string', description: '目标实例 ID（与 targetPath 二选一）' },
+          category: { type: 'string', description: '实例内目录：resourcepacks / mods / shaderpacks / datapacks 等（默认 mods）' },
+          fileName: { type: 'string', description: '保存文件名（可选；targetPath 已含文件名时可省略）' },
+          headers: { type: 'object', additionalProperties: { type: 'string' }, description: '自定义请求头（可选）' },
+          extract: { type: 'boolean', description: '仅对 .zip 生效：下载后自动解压并删除原 zip（默认 false）' },
+        },
+        required: ['url'],
       },
     },
   },

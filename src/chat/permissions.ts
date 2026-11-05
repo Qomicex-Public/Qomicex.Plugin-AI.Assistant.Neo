@@ -31,6 +31,7 @@ export const TOOL_REQUIRED_PERMISSION: Record<string, FilePermission> = {
   RunProcess: 'write',
   GetProcessLogs: 'readonly',
   StopProcess: 'write',
+  DownloadFile: 'write',
 }
 
 const RANK: Record<FilePermission, number> = { readonly: 0, write: 1, full: 2 }

@@ -60,11 +60,30 @@ site:mcmod.cn <整合包名> 汉化
 ### 1.4 安装方式
 
 - **资源包**：放进 `<instance>/resourcepacks/`，游戏内移到最上方，`F3 + T` 重载。
-- **模组**（如 I18nUpdateMod）：放进 `mods/`，注意版本/加载器；首次启动会联网下载翻译。
+- **模组**（如 I18nUpdateMod / VMTU）：放进 `mods/`，注意版本/加载器；首次启动会联网下载翻译。
 - **补丁包**（config/quests 覆盖）：先备份 `<instance>/config`，按 README 覆盖对应目录。
 - **安装器**：默认不运行；必须让用户明确同意，并先确认来源与行为。
 
 > 版本接近但不完全匹配时：只提取其中的 `assets/**/lang` 与 `config/**/lang` 做覆盖，**不要跑安装器**，然后按第 3 节验证。
+
+### 1.5 下载与检查（用 DownloadFile）
+
+找到候选包后不要直接往实例里解压：
+
+1. 拿直链：Modrinth/CurseForge 用 `getVersionDownloads`；GitHub Releases 用 `browser_download_url`；网页用 `fetchWeb` 解析。
+2. `DownloadFile({ url, targetPath: "<临时工作区>\\downloads\\<包名>.zip" })` 下到临时工作区。
+3. `getDownloadProgress(taskId)` 等到 `completed`。
+4. `tar -tf` 或 `Decompress` 检查包内结构：
+   - `assets/**/lang/zh_cn.json` → 模组/指南书资源包；
+   - `config/ftbquests/quests/lang/zh_cn.snbt` → 任务书补丁；
+   - `*.exe` / `*.bat` / `*.ps1` → 先停下，确认来源与行为。
+5. 确认后再安装：
+   - 资源包：`DownloadFile({ url, instanceId, category: "resourcepacks", fileName })`，或复制已检查的目录；
+   - 模组：`DownloadFile({ url, instanceId, category: "mods", fileName })`；
+   - config 补丁：备份 `config/` 后手动解压覆盖。
+6. 防盗链/鉴权用 `headers`；`.zip` 可 `extract: true` 自动解压（会删除原 zip）。
+
+> `DownloadFile` 需要「可写」及以上权限；大文件按 15 秒间隔轮询进度。
 
 ## 2. 没有现成包：确定翻译范围
 

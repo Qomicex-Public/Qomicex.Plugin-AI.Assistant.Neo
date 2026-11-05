@@ -9,6 +9,7 @@ Qomicex 启动器的 AI 助手插件，支持多模型对话、流式输出、�
 - 内置工具（实例 / 资源 / 文件 / 网络 / Wiki / UI 自动化等）
 - **技能（Skill）**：目录 + 渐进式加载，启动只注入名称与描述
 - **MCP（HTTP / SSE）**：工具发现与调用，支持第三方插件运行期注册
+- **任意文件下载**：`DownloadFile` 支持临时工作区/实例目录、鉴权头与 zip 自动解压
 - **后台长任务**：`RunProcess` / `GetProcessLogs` / `StopProcess`，绕过 120 秒命令上限
 - **开放注册接口**：其它插件可注册 Skill / MCP（`ai.*` 方法）
 - Markdown / 代码高亮渲染、对话历史、配置持久化、悬浮窗模式
@@ -100,6 +101,25 @@ version: 1
 - 系统提示词只列名称 + 描述（每条最多 200 字，最多 30 条）。
 - 模型调用 `Skill(name)` 时才读取正文。
 - 设置页可逐个禁用（存 `disabledSkills: string[]`），禁用后既不进目录也不能加载。
+
+## 文件下载
+
+`startDownload` 适合「已确定实例 + 类别」的资源；汉化包、资源包、临时检查用 `DownloadFile`：
+
+```ts
+DownloadFile({
+  url: 'https://example.com/pack.zip',
+  targetPath: 'D:\\temp\\qomicex-assistant\\downloads\\pack.zip',
+  // 或：instanceId: '<id>', category: 'resourcepacks', fileName: 'pack.zip'
+  headers: { Referer: 'https://example.com/' },
+  extract: false,
+})
+```
+
+- 返回 `taskId`，用 `getDownloadProgress(taskId)` 轮询（首次建议 sleep 3–5 秒，之后 15 秒一次）。
+- `targetPath` 用于先下到临时工作区检查压缩包内容；`instanceId + category` 直接进实例目录。
+- `extract: true` 仅对 `.zip` 生效：下载后解压到目标目录并删除原 zip。
+- 需要「可写」及以上文件权限；下载目录首次访问可能触发启动器授权。
 
 ## 后台长任务
 
