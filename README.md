@@ -59,7 +59,7 @@ description: 排查 Minecraft 整合包启动崩溃，定位日志中的模组�
 whenToUse: 用户贴出 crash-report 或提到「启动崩溃」
 version: 1
 ---
-正文（Markdown）。可以引用同目录的 references/、scripts/ 文件。
+正文（Markdown）。用户目录技能可以引用同目录的 references/、scripts/ 文件（用 Read 读取）；内置技能没有磁盘目录，知识要点需写在正文里。
 ```
 
 - 缺 `name` 时用目录名。
@@ -75,6 +75,23 @@ version: 1
 | 第三方插件 | `ai.registerSkill` | 运行期注册，持久化到 cache，见下文 |
 
 同名技能按「内置 → 用户 → 插件」优先，重复的自动加 `#2` 后缀。
+
+### 内置技能
+
+构建时随插件打包，运行时只读。当前内置：
+
+| 技能 | 用途 |
+| --- | --- |
+| `mc-crash-debug` | 启动崩溃/闪退：日志定位、Java 对照、退出码、模组二分 |
+| `mc-instance-setup` | 新建实例：版本/加载器/Java/内存选择，安装与启动验证 |
+| `mc-mod-compat` | 模组版本/加载器/前置依赖匹配，去重与冲突排查 |
+| `mc-modpack-install` | 本地/在线整合包安装、迁移与失败排查 |
+| `mc-server-connect` | 联机开房/加入服务器：NAT、端口、版本与模组对齐 |
+| `mc-performance-tuning` | 低帧/卡顿诊断：CPU/GPU/内存瓶颈与最小改动优化 |
+| `qomicex-diagnostics` | 启动器/插件问题：manifest、权限、代理、文件授权、进程 |
+| `mc-knowledge-research` | Wiki/MC百科/网页交叉验证与规范输出 |
+
+内置技能没有真实磁盘路径，`Skill` 工具会把正文完整内联；因此知识要点写在 `SKILL.md` 正文里，而不是 `references/`。
 
 ### 渐进式加载
 
