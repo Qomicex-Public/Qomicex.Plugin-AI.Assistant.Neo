@@ -42,6 +42,12 @@ function compactItem(item: any): string {
 }
 
 export function summarizeToolResult(_name: string, result: any): string {
+  // 约定 `__raw_text`：handler 已经排好版并控制好预算（Skill 正文、MCP 输出、
+  // 进程日志）。这里必须原样透传，否则默认的「4 个键 / 每值 80 字」压缩会把
+  // 正文削到不可用。
+  if (result && typeof result === 'object' && !Array.isArray(result) && typeof result.__raw_text === 'string') {
+    return result.__raw_text
+  }
   if (Array.isArray(result)) {
     const parts = result.slice(0, TOOL_RESULT_TRIM_ITEMS).map(compactItem)
     if (result.length > TOOL_RESULT_TRIM_ITEMS) parts.push('…共 ' + result.length + ' 项，已截断')

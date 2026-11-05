@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { fetchModels as engineFetchModels, testConnection, testModel, saveConfig } from '../chat/engine.ts'
 import type { ReasoningEffort, Modality, FilePermission } from '../chat/types.ts'
+import type { McpServerConfig } from '../chat/mcp.ts'
+import CapabilitySettings from './CapabilitySettings.tsx'
 
 export interface ConfigValues {
   baseUrl: string
@@ -15,6 +17,16 @@ export interface ConfigValues {
   maxTokens: number
   /** 「启动器操作」（UI 自动化）总开关，与文件权限独立 */
   uiControl: boolean
+  /** 技能总开关 */
+  skillsEnabled: boolean
+  /** 用户技能目录（空 = 不启用） */
+  skillsDir: string
+  /** 被禁用的技能 id */
+  disabledSkills: string[]
+  /** MCP 总开关 */
+  mcpEnabled: boolean
+  /** MCP 服务器（不含第三方注册的服务器） */
+  mcpServers: McpServerConfig[]
 }
 
 interface ConfigFormProps {
@@ -80,6 +92,11 @@ export default function ConfigForm({
   const [filePermission, setFilePermission] = useState<FilePermission>(initial.filePermission || 'readonly')
   const [maxTokens, setMaxTokens] = useState<number>(initial.maxTokens || 8192)
   const [uiControl, setUiControl] = useState<boolean>(initial.uiControl === true)
+  const [skillsEnabled, setSkillsEnabled] = useState<boolean>(initial.skillsEnabled !== false)
+  const [skillsDir, setSkillsDir] = useState<string>(initial.skillsDir || '')
+  const [disabledSkills, setDisabledSkills] = useState<string[]>(initial.disabledSkills || [])
+  const [mcpEnabled, setMcpEnabled] = useState<boolean>(initial.mcpEnabled === true)
+  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>(initial.mcpServers || [])
   const [status, setStatus] = useState<{ text: string; color?: string }>({ text: '' })
   const [busy, setBusy] = useState(false)
 
@@ -100,6 +117,11 @@ export default function ConfigForm({
     setFilePermission(initial.filePermission || 'readonly')
     setMaxTokens(initial.maxTokens || 8192)
     setUiControl(initial.uiControl === true)
+    setSkillsEnabled(initial.skillsEnabled !== false)
+    setSkillsDir(initial.skillsDir || '')
+    setDisabledSkills(initial.disabledSkills || [])
+    setMcpEnabled(initial.mcpEnabled === true)
+    setMcpServers(initial.mcpServers || [])
     // 只在外部 initial 真正变化时同步（对象由父级按值重建）
   }, [
     initial.baseUrl,
@@ -111,8 +133,13 @@ export default function ConfigForm({
     initial.filePermission,
     initial.maxTokens,
     initial.uiControl,
+    initial.skillsEnabled,
+    initial.skillsDir,
+    initial.mcpEnabled,
     /* 数组按内容比较，避免父级每次渲染都重置 */
     initial.modalities?.join(','),
+    initial.disabledSkills?.join(','),
+    JSON.stringify(initial.mcpServers || []),
   ])
 
   function show(msg: string, color?: string) {
@@ -200,6 +227,11 @@ export default function ConfigForm({
         filePermission,
         maxTokens,
         uiControl,
+        skillsEnabled,
+        skillsDir,
+        disabledSkills,
+        mcpEnabled,
+        mcpServers,
       },
       { settingsMode }
     )
@@ -351,6 +383,19 @@ export default function ConfigForm({
             {!modalities.includes('image') && '（未勾选图片模态时不会提供截图工具）'}
           </div>
         </div>
+
+        <CapabilitySettings
+          skillsEnabled={skillsEnabled}
+          setSkillsEnabled={setSkillsEnabled}
+          skillsDir={skillsDir}
+          setSkillsDir={setSkillsDir}
+          disabledSkills={disabledSkills}
+          setDisabledSkills={setDisabledSkills}
+          mcpEnabled={mcpEnabled}
+          setMcpEnabled={setMcpEnabled}
+          mcpServers={mcpServers}
+          setMcpServers={setMcpServers}
+        />
 
         <button className="p-btn p-btn--primary" style={{ width: '100%' }} onClick={doSave} disabled={busy}>
           {submitLabel}

@@ -1,9 +1,12 @@
-import type { ChatMessage, UiMessage, ToolEntryLine, ReasoningEffort, Modality, MessagePart, FilePermission } from './types.ts'
+import type { ChatMessage, UiMessage, ToolEntryLine, ReasoningEffort, Modality, MessagePart, FilePermission, ToolDef } from './types.ts'
 import { getApi } from '../api.ts'
-import { SYSTEM_PROMPT, UI_CONTROL_PROMPT } from './systemPrompt.ts'
+import { SYSTEM_PROMPT, UI_CONTROL_PROMPT, MCP_PROMPT } from './systemPrompt.ts'
 import { toolDefs } from './toolDefs.ts'
 import { uiToolDefs } from './uiTools.ts'
-import { handlers, setApiRef, toolNamesCN, type ToolArgs } from './handlers.ts'
+import { resolveHandler, setApiRef, toolDisplayName, type ToolArgs } from './handlers.ts'
+import { configureSkills, isSkillToolAvailable, skillsPromptSection } from './skills.ts'
+import { configureMcp, getMcpToolDefs, setMcpNotifier, setToolAbortSignal, type McpServerConfig } from './mcp.ts'
+import { ensureRegistryLoaded, initRegistry, reloadRegistryFromCache } from './registry.ts'
 import { setToolPermission } from './fileTools.ts'
 import { setUiControlEnabled } from './uiControl.ts'
 import { workspacePromptSection, isWindowsPlatform } from './permissions.ts'
@@ -46,6 +49,16 @@ export interface EngineSnapshot {
     maxTokens: number
     /** 「启动器操作」（UI 自动化）总开关 */
     uiControl: boolean
+    /** 技能总开关 */
+    skillsEnabled: boolean
+    /** 用户技能目录（空 = 不启用） */
+    skillsDir: string
+    /** 被禁用的技能 id */
+    disabledSkills: string[]
+    /** MCP 总开关 */
+    mcpEnabled: boolean
+    /** MCP 服务器配置 */
+    mcpServers: McpServerConfig[]
     configured: boolean
     thinking: boolean
   }
@@ -73,6 +86,16 @@ const state = {
   filePermission: 'readonly' as FilePermission,
   /** 「启动器操作」开关：开启后才会把这组 UI 自动化工具挂给模型 */
   uiControl: false,
+  /** 技能总开关（关闭后目录与 Skill 工具都不可见） */
+  skillsEnabled: true,
+  /** 用户技能目录；空 = 不扫描 */
+  skillsDir: '',
+  /** 被禁用的技能 id（来源隔离的稳定 id） */
+  disabledSkills: [] as string[],
+  /** MCP 总开关 */
+  mcpEnabled: false,
+  /** MCP 服务器配置（设置页维护；第三方注册的服务器由 registry 合并） */
+  mcpServers: [] as McpServerConfig[],
   /** 单次回复输出上限（思考与正文共享） */
   maxTokens: 8192,
   /** 会话级文件权限覆盖；null = 跟随全局默认 */
@@ -113,6 +136,11 @@ function buildSnapshot(): EngineSnapshot {
       effectivePermission: state.permissionOverride ?? state.filePermission,
       maxTokens: state.maxTokens,
       uiControl: state.uiControl,
+      skillsEnabled: state.skillsEnabled,
+      skillsDir: state.skillsDir,
+      disabledSkills: state.disabledSkills,
+      mcpEnabled: state.mcpEnabled,
+      mcpServers: state.mcpServers,
       configured: !!state.apiKey,
       thinking: state.thinking,
     },
@@ -169,7 +197,7 @@ function addProgress(msg: string, type: string) {
 function addToolEntry(toolName: string, argsText: string, timeMs: number): number {
   // 「显示工具调用过程」关闭时仍要执行工具，只是不渲染条目。返回 -1 供调用方跳过结果写入。
   if (!state.showToolProcess) return -1
-  const cn = toolNamesCN[toolName] || toolName
+  const cn = toolDisplayName(toolName)
   const base = '✦ 调用 ' + cn + ' (' + toolName + ') · ' + timeMs + 'ms'
   const id = pushUi({ kind: 'tool', toolName: toolName, content: base, toolArgsText: argsText, toolLines: [], collapsed: true })
   return id
@@ -471,6 +499,8 @@ export function stopGeneration() {  stopRequested = true
  */
 let cachedWorkspaceSection: string | null = null
 async function buildSystemPrompt(): Promise<string> {
+  // 第三方注册表可能还在异步载入；技能目录要合并它，先等一拍（已载入时是空 Promise）
+  await ensureRegistryLoaded()
   if (cachedWorkspaceSection === null) {
     try {
       cachedWorkspaceSection = await workspacePromptSection()
@@ -481,13 +511,22 @@ async function buildSystemPrompt(): Promise<string> {
   const perm = state.permissionOverride ?? state.filePermission
   const permText =
     perm === 'readonly'
-      ? '只读：只能用 Read / Grep，禁止 Write / Edit / Bash / Compress / Decompress。'
+      ? '只读：只能用 Read / Grep / GetProcessLogs，禁止 Write / Edit / Bash / RunProcess / StopProcess / Compress / Decompress。'
       : perm === 'write'
-        ? '可写：Read / Write / Edit / Grep / Bash / Compress / Decompress 均可用；首次访问未授权目录时启动器会弹窗要用户授权。'
+        ? '可写：Read / Write / Edit / Grep / Bash / RunProcess / GetProcessLogs / StopProcess / Compress / Decompress 均可用；首次访问未授权目录时启动器会弹窗要用户授权。'
         : '完全访问：所有文件与命令工具均可用，不再逐一确认。仍应避免破坏性操作。'
   // 界面操作章节只在开关打开时给：没开就不提，模型才不会以为自己能点界面
   const uiText = state.uiControl && isWindowsPlatform() ? `\n${UI_CONTROL_PROMPT}` : ''
-  return `${SYSTEM_PROMPT}\n${cachedWorkspaceSection}\n\n## 当前文件权限\n${permText}${uiText}`
+  // 技能目录：只放名称/描述，正文由 Skill 工具按需加载；内容稳定，利于前缀缓存
+  let skillText = ''
+  try {
+    skillText = await skillsPromptSection()
+  } catch {
+    skillText = ''
+  }
+  // 没启用 MCP 时不提，避免白占 token
+  const mcpText = state.mcpEnabled ? `\n${MCP_PROMPT}` : ''
+  return `${SYSTEM_PROMPT}\n${cachedWorkspaceSection}\n\n## 当前文件权限\n${permText}${uiText}${skillText}${mcpText}`
 }
 
 /**
@@ -499,21 +538,28 @@ async function buildSystemPrompt(): Promise<string> {
  * 两个额外过滤：
  *   - 非 Windows 不提供（驱动依赖 UIAutomation + Win32 消息投递）。
  *   - 模型没声明 image 模态时不提供 UiScreenshot：截了也没法看，纯浪费一次抓屏。
+ *
+ * MCP 工具是运行期的，不进静态表；技能工具在没有可用技能时也隐藏。
  */
-function getActiveToolDefs(): typeof toolDefs {
-  if (!state.uiControl || !isWindowsPlatform()) return toolDefs
-  const extra = uiToolDefs.filter(
-    (t) => t.function.name !== 'UiScreenshot' || state.modalities.includes('image'),
-  )
-  return [...toolDefs, ...extra]
+async function getActiveToolDefs(): Promise<ToolDef[]> {
+  const defs: ToolDef[] = toolDefs.filter((t) => t.function.name !== 'Skill' || isSkillToolAvailable())
+  if (state.uiControl && isWindowsPlatform()) {
+    const extra = uiToolDefs.filter(
+      (t) => t.function.name !== 'UiScreenshot' || state.modalities.includes('image'),
+    )
+    defs.push(...extra)
+  }
+  const mcpDefs = await getMcpToolDefs()
+  if (mcpDefs.length) defs.push(...mcpDefs)
+  return defs
 }
 
-function streamCtx(): StreamTurnCtx {
+function streamCtx(tools: ToolDef[]): StreamTurnCtx {
   return {
     model: state.model,
     baseUrl: state.baseUrl,
     apiKey: state.apiKey,
-    tools: getActiveToolDefs(),
+    tools: tools,
     // 会话覆盖优先，其次全局默认；'off' 时 stream 层不会发送 reasoning_effort
     reasoningEffort: state.effortOverride ?? state.reasoningEffort,
     maxTokens: state.maxTokens,
@@ -551,12 +597,21 @@ async function resyncGlobals(): Promise<void> {
   if (!api || !api.call) return
   try {
     const s: any = (await api.call('getSettings')) || {}
+    // 注册表可能在另一个 iframe（设置页）里被禁用/删除，发送前同步一次
+    await reloadRegistryFromCache()
     state.uiControl = s.uiControl === true
     if (s.filePermission) state.filePermission = s.filePermission as FilePermission
     if (s.reasoningEffort) state.reasoningEffort = s.reasoningEffort as ReasoningEffort
     if (Array.isArray(s.modalities) && s.modalities.length) state.modalities = s.modalities as Modality[]
     if (typeof s.maxTokens === 'number' && s.maxTokens > 0) state.maxTokens = s.maxTokens
     if (s.showToolProcess !== undefined) state.showToolProcess = s.showToolProcess !== false
+    state.skillsEnabled = s.skillsEnabled !== false
+    state.skillsDir = typeof s.skillsDir === 'string' ? s.skillsDir : ''
+    state.disabledSkills = Array.isArray(s.disabledSkills) ? s.disabledSkills.map(String) : []
+    state.mcpEnabled = s.mcpEnabled === true
+    state.mcpServers = Array.isArray(s.mcpServers) ? (s.mcpServers as McpServerConfig[]) : []
+    configureSkills({ enabled: state.skillsEnabled, dir: state.skillsDir, disabled: state.disabledSkills })
+    configureMcp({ enabled: state.mcpEnabled, servers: state.mcpServers })
     syncToolPermission()
     emit()
   } catch {
@@ -581,6 +636,7 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
 
   abortCtrl = new AbortController()
   const signal = abortCtrl.signal
+  setToolAbortSignal(signal)
   stopRequested = false
   thinkingStart = Date.now()
 
@@ -676,7 +732,7 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
     let t0 = Date.now()
     // 消息一入队就落盘一次：保证「有用户消息的会话」立刻出现在历史里
     await persistCurrent()
-    let turn = await streamTurn(msgs, signal, onDelta, streamCtx(), (r) => setThinkingDetail(thinkingId, r))
+    let turn = await streamTurn(msgs, signal, onDelta, streamCtx(await getActiveToolDefs()), (r) => setThinkingDetail(thinkingId, r))
     finishThinking(thinkingId)
     if (stopRequested) {
       return
@@ -705,7 +761,7 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
           Object.assign(args, JSON.parse(tc.function.arguments))
         } catch (e) {}
         const detailId = addToolEntry(tc.function.name, JSON.stringify(args).slice(0, 80), elapsed)
-        const handler = handlers[tc.function.name]
+        const handler = resolveHandler(tc.function.name)
         let result: unknown
         try {
           // 每次工具调用前同步权限（会话覆盖优先），确保门禁与下拉框一致
@@ -732,7 +788,7 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
       t0 = Date.now()
       msgs = [{ role: 'system', content: await buildSystemPrompt() }, ...state.messages]
       const tId = pushUi({ kind: 'thinking', thinkingStart: Date.now() })
-      turn = await streamTurn(msgs, signal, onDelta, streamCtx(), (r) => setThinkingDetail(tId, r))
+      turn = await streamTurn(msgs, signal, onDelta, streamCtx(await getActiveToolDefs()), (r) => setThinkingDetail(tId, r))
       finishThinking(tId)
       if (stopRequested) {
         return
@@ -784,6 +840,7 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
     }
   } finally {
     // 无论正常结束、停止、还是出错，都保证当前会话落盘（历史不丢）
+    setToolAbortSignal(undefined)
     cleanup()
     await persistCurrent()
   }
@@ -874,6 +931,11 @@ export function saveConfig(
     filePermission?: FilePermission
     maxTokens?: number
     uiControl?: boolean
+    skillsEnabled?: boolean
+    skillsDir?: string
+    disabledSkills?: string[]
+    mcpEnabled?: boolean
+    mcpServers?: McpServerConfig[]
   },
   opts: {
     /**
@@ -893,6 +955,13 @@ export function saveConfig(
   if (cfg.filePermission) state.filePermission = cfg.filePermission
   if (cfg.maxTokens) state.maxTokens = cfg.maxTokens
   if (cfg.uiControl !== undefined) state.uiControl = cfg.uiControl === true
+  if (cfg.skillsEnabled !== undefined) state.skillsEnabled = cfg.skillsEnabled === true
+  if (cfg.skillsDir !== undefined) state.skillsDir = String(cfg.skillsDir || '').trim()
+  if (cfg.disabledSkills !== undefined) state.disabledSkills = Array.isArray(cfg.disabledSkills) ? cfg.disabledSkills.map(String) : []
+  if (cfg.mcpEnabled !== undefined) state.mcpEnabled = cfg.mcpEnabled === true
+  if (cfg.mcpServers !== undefined) state.mcpServers = Array.isArray(cfg.mcpServers) ? cfg.mcpServers : []
+  configureSkills({ enabled: state.skillsEnabled, dir: state.skillsDir, disabled: state.disabledSkills })
+  configureMcp({ enabled: state.mcpEnabled, servers: state.mcpServers })
   // 全局默认变化后，会话级覆盖失效
   state.effortOverride = null
   state.permissionOverride = null
@@ -911,6 +980,11 @@ export function saveConfig(
     .then(() => api.call('setSettings', 'uiControl', state.uiControl))
     .then(() => api.call('setSettings', 'maxTokens', state.maxTokens))
     .then(() => api.call('setSettings', 'modalities', state.modalities))
+    .then(() => api.call('setSettings', 'skillsEnabled', state.skillsEnabled))
+    .then(() => api.call('setSettings', 'skillsDir', state.skillsDir))
+    .then(() => api.call('setSettings', 'disabledSkills', state.disabledSkills))
+    .then(() => api.call('setSettings', 'mcpEnabled', state.mcpEnabled))
+    .then(() => api.call('setSettings', 'mcpServers', state.mcpServers))
     .then(() => {
       if (!opts.settingsMode) showChatView()
       return { ok: true }
@@ -930,16 +1004,30 @@ export function init(): void {
   initialized = true
   const api = getApi()
   setApiRef(api)
+  // 跨插件注册接口：即使还没配置 API Key 也要先挂上（别的插件可能随时来注册）
+  initRegistry()
+  setMcpNotifier((msg) => {
+    if (state.thinking) addProgress(msg, 'error')
+  })
   loadDsTokenizer().then(() => updateCtxDisplay())
   if (!api || !api.call) {
     view = 'config'
     emit()
     return
   }
+  void ensureRegistryLoaded()
   api
     .call('getSettings')
     .then((s: any) => {
       const settings = s || {}
+      // 能力类配置与 API Key 无关：即使还没配置模型，也要让注册表/技能/MCP 状态正确
+      state.skillsEnabled = settings.skillsEnabled !== false
+      state.skillsDir = typeof settings.skillsDir === 'string' ? settings.skillsDir : ''
+      state.disabledSkills = Array.isArray(settings.disabledSkills) ? settings.disabledSkills.map(String) : []
+      state.mcpEnabled = settings.mcpEnabled === true
+      state.mcpServers = Array.isArray(settings.mcpServers) ? (settings.mcpServers as McpServerConfig[]) : []
+      configureSkills({ enabled: state.skillsEnabled, dir: state.skillsDir, disabled: state.disabledSkills })
+      configureMcp({ enabled: state.mcpEnabled, servers: state.mcpServers })
       if (settings.deepseekApiKey) {
         state.apiKey = settings.deepseekApiKey
         state.baseUrl = (settings.baseUrl || 'https://api.deepseek.com/v1').replace(/\/+$/, '')

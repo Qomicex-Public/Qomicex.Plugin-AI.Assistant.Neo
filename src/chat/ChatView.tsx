@@ -829,6 +829,11 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                 filePermission: snapshot.cfg.filePermission,
                 maxTokens: snapshot.cfg.maxTokens,
                 uiControl: snapshot.cfg.uiControl,
+                skillsEnabled: snapshot.cfg.skillsEnabled,
+                skillsDir: snapshot.cfg.skillsDir,
+                disabledSkills: snapshot.cfg.disabledSkills,
+                mcpEnabled: snapshot.cfg.mcpEnabled,
+                mcpServers: snapshot.cfg.mcpServers,
               }}
               onSaved={showChatView}
               onBack={snapshot.cfg.configured ? showChatView : undefined}

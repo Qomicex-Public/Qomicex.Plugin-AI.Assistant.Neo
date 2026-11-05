@@ -585,9 +585,9 @@ export const toolDefs: ToolDef[] = [
     function: {
       name: 'Bash',
       description:
-        '执行命令行命令。Windows 使用 PowerShell（powershell -NoProfile -Command），mac/linux 使用 /bin/sh -c。' +
-        '注意：不继承工作目录，请用 workdir 指定，或在命令里自行 cd / 用绝对路径；单次上限 120 秒，不能跑常驻进程。' +
-        '用于运行脚本、批处理、查询环境等。需要权限：可写及以上。',
+        '执行命令行命令（同步等待）。Windows 使用 PowerShell（powershell -NoProfile -Command），mac/linux 使用 /bin/sh -c。' +
+        '注意：不继承工作目录，请用 workdir 指定，或在命令里自行 cd / 用绝对路径；**单次最长 120 秒**，超时会杀掉进程且拿不到输出。' +
+        '长任务（测试/构建/安装，预计超过 2 分钟）请改用 RunProcess 后台启动。用于短命令、查询环境等。需要权限：可写及以上。',
       parameters: {
         type: 'object',
         properties: {
@@ -630,6 +630,67 @@ export const toolDefs: ToolDef[] = [
           format: { type: 'string', enum: ['zip', 'tar.gz'], description: '归档格式（默认 zip）' },
         },
         required: ['sources'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'Skill',
+      description:
+        '加载一个技能的完整说明（Markdown）。技能目录只出现在系统提示词的「可用技能」里，正文不会预加载。' +
+        '只使用目录里列出的名称，不要凭名字臆测内容。返回正文、来源与技能目录（可用 Read 读 references/、scripts/）。',
+      parameters: {
+        type: 'object',
+        properties: { name: { type: 'string', description: '技能名称（来自系统提示词「可用技能」）' } },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'RunProcess',
+      description:
+        '在后台启动一个长任务（测试/构建/安装等，可运行数分钟以上），**立即返回 pid**，不阻塞对话。' +
+        'Windows 用 pwsh（不可用时回退 powershell.exe），脚本经 -EncodedCommand 传递，支持引号、换行与中文路径。' +
+        '启动后告知用户，再用 GetProcessLogs(pid) 轮询输出；需要停止用 StopProcess(pid)。需要权限：可写及以上。',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: '要执行的 PowerShell 脚本/命令' },
+          cwd: { type: 'string', description: '工作目录绝对路径（可选，推荐填写）' },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'GetProcessLogs',
+      description:
+        '增量读取后台进程输出（stdout/stderr）。传上次返回的 nextSeq 作为 afterSeq，避免重复读取。' +
+        '返回 alive / exitCode / nextSeq / oldestSeq 与 output；没有新输出时 output 为「(暂无新输出)」。',
+      parameters: {
+        type: 'object',
+        properties: {
+          pid: { type: 'integer', description: 'RunProcess 返回的进程 id' },
+          afterSeq: { type: 'integer', description: '只返回 seq 大于该值的日志（首次传 0）' },
+        },
+        required: ['pid'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'StopProcess',
+      description: '停止 RunProcess 启动的后台进程（终止整棵进程树，幂等）。需要权限：可写及以上。',
+      parameters: {
+        type: 'object',
+        properties: { pid: { type: 'integer', description: 'RunProcess 返回的进程 id' } },
+        required: ['pid'],
       },
     },
   },

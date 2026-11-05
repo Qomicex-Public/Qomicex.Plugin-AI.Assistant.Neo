@@ -14,6 +14,11 @@ const DEFAULTS: ConfigValues = {
   filePermission: 'readonly',
   maxTokens: 8192,
   uiControl: false,
+  skillsEnabled: true,
+  skillsDir: '',
+  disabledSkills: [],
+  mcpEnabled: false,
+  mcpServers: [],
 }
 
 export default function SettingsApp() {
@@ -46,6 +51,11 @@ export default function SettingsApp() {
           filePermission: (settings.filePermission as FilePermission) || 'readonly',
           maxTokens: typeof settings.maxTokens === 'number' && settings.maxTokens > 0 ? settings.maxTokens : 8192,
           uiControl: settings.uiControl === true,
+          skillsEnabled: settings.skillsEnabled !== false,
+          skillsDir: typeof settings.skillsDir === 'string' ? settings.skillsDir : '',
+          disabledSkills: Array.isArray(settings.disabledSkills) ? settings.disabledSkills.map(String) : [],
+          mcpEnabled: settings.mcpEnabled === true,
+          mcpServers: Array.isArray(settings.mcpServers) ? settings.mcpServers : [],
         })
       })
       .catch(() => setInitial(DEFAULTS))

@@ -1,5 +1,8 @@
 import type { PluginApi } from '../api.ts'
 import * as fileTools from './fileTools.ts'
+import * as processTools from './processTools.ts'
+import { toolSkill } from './skills.ts'
+import { describeMcpTool, resolveMcpHandler } from './mcp.ts'
 import { isUiControlEnabled } from './uiControl.ts'
 import { runAgent, readShotDataUrl, type AgentResult } from './uiAgent.ts'
 
@@ -695,6 +698,10 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
   Bash: (a) => fileTools.toolBash(a),
   Compress: (a) => fileTools.toolCompress(a),
   Decompress: (a) => fileTools.toolDecompress(a),
+  Skill: (a) => toolSkill(a),
+  RunProcess: (a) => processTools.toolRunProcess(a),
+  GetProcessLogs: (a) => processTools.toolGetProcessLogs(a),
+  StopProcess: (a) => processTools.toolStopProcess(a),
   convertDocument: (a) => {
     const path = (a.path || '').trim()
     if (!path) return { error: '请输入文件路径' }
@@ -927,6 +934,21 @@ const handlers: Record<string, (a: ToolArgs) => unknown> = {
 
 export { handlers }
 
+/**
+ * 统一 handler 解析：静态工具优先，其次 MCP 动态工具。
+ * MCP 工具名（mcp__<server>__<tool>）只存在于运行期，不在静态表里。
+ */
+export function resolveHandler(name: string): ((a: ToolArgs) => unknown) | undefined {
+  const staticHandler = handlers[name]
+  if (staticHandler) return staticHandler
+  return resolveMcpHandler(name)
+}
+
+/** 工具卡片上的显示名：中文名表 → MCP 描述 → 原名。 */
+export function toolDisplayName(name: string): string {
+  return toolNamesCN[name] || describeMcpTool(name) || name
+}
+
 export const toolNamesCN: Record<string, string> = {
   listInstances: '列出实例', getInstance: '实例详情', getInstanceLaunchProgress: '启动进度',
   createInstance: '创建实例', launchInstance: '启动实例', installInstance: '安装实例',
@@ -947,6 +969,8 @@ export const toolNamesCN: Record<string, string> = {
   sendNotification: '发送通知', navigateTo: '导航', callBackendApi: '调用后端',
   bingSearch: '网页搜索', fetchWeb: '抓取网页', Read: '读取文件', Write: '写入文件', Edit: '编辑文件',
   Grep: '搜索内容', Bash: '执行命令', Compress: '压缩', Decompress: '解压', convertDocument: '文档转换',
+  Skill: '加载技能',
+  RunProcess: '后台运行', GetProcessLogs: '查看进程日志', StopProcess: '停止进程',
   sleep: '延迟等待',
   UiSnapshot: '界面快照', UiClick: '点击界面', UiType: '界面输入',
   UiKeys: '界面按键', UiFocus: '激活窗口', UiScreenshot: '界面截图',
