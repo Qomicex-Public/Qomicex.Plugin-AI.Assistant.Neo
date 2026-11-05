@@ -1,4 +1,4 @@
-import type { ChatMessage, UiMessage, ToolEntryLine, ReasoningEffort, Modality, MessagePart, FilePermission, ToolDef } from './types.ts'
+import type { ChatMessage, UiMessage, ToolEntryLine, ReasoningEffort, Modality, MessagePart, FilePermission, ToolDef, PermissionRequest } from './types.ts'
 import { getApi } from '../api.ts'
 import { SYSTEM_PROMPT, UI_CONTROL_PROMPT, MCP_PROMPT } from './systemPrompt.ts'
 import { toolDefs } from './toolDefs.ts'
@@ -7,9 +7,10 @@ import { resolveHandler, setApiRef, toolDisplayName, type ToolArgs } from './han
 import { configureSkills, isSkillToolAvailable, skillsPromptSection } from './skills.ts'
 import { configureMcp, getMcpToolDefs, setMcpNotifier, setToolAbortSignal, type McpServerConfig } from './mcp.ts'
 import { ensureRegistryLoaded, initRegistry, reloadRegistryFromCache } from './registry.ts'
+import { setPermissionRequester, type WritePermissionResult } from './permissionTools.ts'
 import { setToolPermission } from './fileTools.ts'
 import { setUiControlEnabled } from './uiControl.ts'
-import { workspacePromptSection, isWindowsPlatform } from './permissions.ts'
+import { workspacePromptSection, isWindowsPlatform, permissionAllows } from './permissions.ts'
 import { streamTurn, type StreamTurnCtx } from './stream.ts'
 import { compressContext, manualCompress, summarizeToolResult, estimateTokens, loadDsTokenizer, type CompressDeps } from './compress.ts'
 import { renderMd, renderMdSync } from './markdown.ts'
@@ -71,6 +72,8 @@ export interface EngineSnapshot {
   conversationTitle: string
   /** 历史会话索引 */
   conversations: ConversationMeta[]
+  /** 等待用户确认的权限提升请求 */
+  permissionRequest: PermissionRequest | null
 }
 
 // ---------- 内部状态 ----------
@@ -113,6 +116,15 @@ let conversationTitle = '新对话'
 let conversations: ConversationMeta[] = []
 let abortCtrl: AbortController | null = null
 let stopRequested = false
+/** 权限提升请求：同一时间只允许一个；由 UI 确认/取消 */
+let pendingPermission: PermissionRequest | null = null
+let permissionResolver: ((ok: boolean) => void) | null = null
+let permissionTimer: ReturnType<typeof setTimeout> | null = null
+let permissionSeq = 0
+let permissionTimedOut = false
+/** 用户拒绝后 15 秒内不再弹窗，避免模型反复申请骚扰用户 */
+let lastPermissionDeniedAt = 0
+const PERMISSION_TIMEOUT_MS = 120000
 let thinkingStart = 0
 let uiSeq = 0
 function nextId() {
@@ -150,6 +162,7 @@ function buildSnapshot(): EngineSnapshot {
     conversationId: conversationId,
     conversationTitle: conversationTitle,
     conversations: conversations,
+    permissionRequest: pendingPermission,
   }
 }
 
@@ -343,6 +356,7 @@ function syncUiSeq() {
 
 /** 新对话：清空当前会话并生成新 id（写回 cache 供胶囊续接）。 */
 export function newChat() {
+  cancelPermissionRequest()
   state.messages = []
   if (abortCtrl) {
     abortCtrl.abort()
@@ -475,13 +489,16 @@ async function persistCurrent() {
 // ---------- 对话控制 ----------
 
 function cleanup() {
+  cancelPermissionRequest()
   state.thinking = false
   abortCtrl = null
   stopRequested = false
   emit()
 }
 
-export function stopGeneration() {  stopRequested = true
+export function stopGeneration() {
+  cancelPermissionRequest()
+  stopRequested = true
   if (abortCtrl) {
     abortCtrl.abort()
     abortCtrl = null
@@ -511,7 +528,7 @@ async function buildSystemPrompt(): Promise<string> {
   const perm = state.permissionOverride ?? state.filePermission
   const permText =
     perm === 'readonly'
-      ? '只读：只能用 Read / Grep / GetProcessLogs，禁止 Write / Edit / Bash / RunProcess / StopProcess / DownloadFile / Compress / Decompress。'
+      ? '只读：只能用 Read / Grep / GetProcessLogs，禁止 Write / Edit / Bash / RunProcess / StopProcess / DownloadFile / Compress / Decompress。确实需要写操作时调用 RequestWritePermission 向用户申请（会弹确认窗，确认后本会话切到可写）。'
       : perm === 'write'
         ? '可写：Read / Write / Edit / Grep / Bash / RunProcess / GetProcessLogs / StopProcess / DownloadFile / Compress / Decompress 均可用；首次访问未授权目录时启动器会弹窗要用户授权。'
         : '完全访问：所有文件与命令工具均可用，不再逐一确认。仍应避免破坏性操作。'
@@ -542,7 +559,14 @@ async function buildSystemPrompt(): Promise<string> {
  * MCP 工具是运行期的，不进静态表；技能工具在没有可用技能时也隐藏。
  */
 async function getActiveToolDefs(): Promise<ToolDef[]> {
-  const defs: ToolDef[] = toolDefs.filter((t) => t.function.name !== 'Skill' || isSkillToolAvailable())
+  const canWrite = permissionAllows(effectivePermission(), 'write')
+  const defs: ToolDef[] = toolDefs.filter((t) => {
+    const name = t.function.name
+    if (name === 'Skill' && !isSkillToolAvailable()) return false
+    // 已经有写权限时不再提供「申请提权」，避免模型无意义地弹窗
+    if (name === 'RequestWritePermission' && canWrite) return false
+    return true
+  })
   if (state.uiControl && isWindowsPlatform()) {
     const extra = uiToolDefs.filter(
       (t) => t.function.name !== 'UiScreenshot' || state.modalities.includes('image'),
@@ -572,8 +596,120 @@ export function setSessionEffort(effort: ReasoningEffort | null) {
   emit()
 }
 
+/** 文件权限等级：只读 < 可写 < 完全访问。 */
+function permissionRank(p: FilePermission): number {
+  return p === 'readonly' ? 0 : p === 'write' ? 1 : 2
+}
+
+function effectivePermission(): FilePermission {
+  return state.permissionOverride ?? state.filePermission
+}
+
+/**
+ * UI 调用：用户点了「允许」或「保持只读」。
+ * 允许时只提升当前会话：若全局已经是可写/完全访问，就清掉会话覆盖跟随全局；
+ * 否则写入会话覆盖为 write。
+ */
+export function resolvePermissionRequest(allow: boolean): void {
+  const resolve = permissionResolver
+  if (!pendingPermission || !resolve) return
+  permissionResolver = null
+  if (permissionTimer) {
+    clearTimeout(permissionTimer)
+    permissionTimer = null
+  }
+  pendingPermission = null
+  permissionTimedOut = false
+  if (allow) {
+    state.permissionOverride = permissionRank(state.filePermission) >= permissionRank('write') ? null : 'write'
+    syncToolPermission()
+  } else {
+    lastPermissionDeniedAt = Date.now()
+  }
+  emit()
+  resolve(allow)
+}
+
+/** 停止生成 / 新建对话 / 异常收尾时取消待确认请求（不计入「用户拒绝」冷却）。 */
+function cancelPermissionRequest(): void {
+  const resolve = permissionResolver
+  if (!pendingPermission || !resolve) return
+  permissionResolver = null
+  if (permissionTimer) {
+    clearTimeout(permissionTimer)
+    permissionTimer = null
+  }
+  pendingPermission = null
+  permissionTimedOut = false
+  emit()
+  resolve(false)
+}
+
+/**
+ * 工具层调用：真正实现「弹窗 → 等用户确认」。
+ * 超时 120 秒自动取消；同一时间只允许一个请求。
+ */
+async function requestWritePermission(reason: string): Promise<WritePermissionResult> {
+  const cur = effectivePermission()
+  if (permissionRank(cur) >= permissionRank('write')) {
+    return { ok: true, permission: cur, already: true }
+  }
+  if (pendingPermission) {
+    return { ok: false, permission: cur, error: '已有一个待确认的权限请求，请等待用户处理后再试。' }
+  }
+  if (Date.now() - lastPermissionDeniedAt < 15000) {
+    return {
+      ok: false,
+      permission: cur,
+      error: '用户刚刚拒绝了提权请求，不要立即重复申请。请先说明为什么必须写入，或改用只读方案。',
+    }
+  }
+
+  const req: PermissionRequest = {
+    id: ++permissionSeq,
+    reason: (String(reason || '').replace(/\s+/g, ' ').trim() || '需要写入文件或执行命令').slice(0, 200),
+    from: cur,
+    to: 'write',
+  }
+  pendingPermission = req
+  permissionTimedOut = false
+  emit()
+
+  const allowed = await new Promise<boolean>((resolve) => {
+    permissionResolver = resolve
+    permissionTimer = setTimeout(() => {
+      if (permissionResolver !== resolve) return
+      permissionResolver = null
+      permissionTimer = null
+      pendingPermission = null
+      permissionTimedOut = true
+      lastPermissionDeniedAt = Date.now()
+      emit()
+      resolve(false)
+    }, PERMISSION_TIMEOUT_MS)
+  })
+
+  if (!allowed) {
+    return {
+      ok: false,
+      permission: effectivePermission(),
+      canceled: true,
+      timedOut: permissionTimedOut,
+      error: permissionTimedOut
+        ? `用户未在 ${Math.round(PERMISSION_TIMEOUT_MS / 1000)} 秒内确认，已取消提权；当前仍为只读。`
+        : '用户拒绝了提权，当前仍为只读。请改用只读方案，或询问用户是否需要切换权限。',
+    }
+  }
+  return { ok: true, permission: effectivePermission() }
+}
+
 /** 会话内切换文件权限（只影响当前会话，不改全局设置）。 */
 export function setSessionPermission(perm: FilePermission | null) {
+  // 用户在确认窗还开着时手动改了下拉框：按新选择直接结束这次请求
+  if (pendingPermission) {
+    const next = perm ?? state.filePermission
+    resolvePermissionRequest(permissionRank(next) >= permissionRank('write'))
+  }
   state.permissionOverride = perm
   syncToolPermission()
   emit()
@@ -1004,6 +1140,8 @@ export function init(): void {
   initialized = true
   const api = getApi()
   setApiRef(api)
+  // 工具层 → engine 的权限请求入口（弹窗逻辑在 engine 里）
+  setPermissionRequester(requestWritePermission)
   // 跨插件注册接口：即使还没配置 API Key 也要先挂上（别的插件可能随时来注册）
   initRegistry()
   setMcpNotifier((msg) => {

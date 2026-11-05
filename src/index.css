@@ -621,6 +621,61 @@ html[data-surface='slots'] body {
   color: hsl(var(--muted-foreground));
 }
 
+/* 权限提权确认窗：覆盖整个聊天区域，必须显式点击才能继续 */
+.perm-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: hsl(var(--background) / 0.78);
+  backdrop-filter: blur(2px);
+}
+.perm-box {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 12px;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  box-shadow: 0 12px 32px hsl(0 0% 0% / 0.28);
+}
+.perm-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+.perm-desc {
+  font-size: 12px;
+  line-height: 1.65;
+  color: hsl(var(--muted-foreground));
+}
+.perm-reason {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: hsl(var(--muted) / 0.65);
+  border: 1px solid hsl(var(--border));
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+.perm-actions {
+  display: flex;
+  gap: 8px;
+}
+.perm-actions .p-btn {
+  flex: 1;
+}
+.perm-hint {
+  font-size: 10.5px;
+  color: hsl(var(--muted-foreground));
+  line-height: 1.5;
+}
+
 /* 会话内思考强度切换 */
 .effort-select {
   height: 20px;

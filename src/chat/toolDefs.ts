@@ -609,6 +609,22 @@ export const toolDefs: ToolDef[] = [
   {
     type: 'function',
     function: {
+      name: 'RequestWritePermission',
+      description:
+        '当当前文件权限为「只读」且确实需要写入文件、执行命令或下载文件时调用。' +
+        '调用后会弹出确认窗；用户确认后**仅当前会话**切换到「可写」。只在必要时申请一次，不要反复调用；' +
+        '用户拒绝后不要立即重试。不能申请「完全访问」。',
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: { type: 'string', description: '向用户说明为什么需要写权限（≤200 字）' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'Bash',
       description:
         '执行命令行命令（同步等待）。Windows 使用 PowerShell（powershell -NoProfile -Command），mac/linux 使用 /bin/sh -c。' +

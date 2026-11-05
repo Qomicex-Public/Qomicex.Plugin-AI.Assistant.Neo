@@ -16,6 +16,7 @@ import {
   toggleThinking,
   setSessionEffort,
   setSessionPermission,
+  resolvePermissionRequest,
   refreshConversations,
   openConversation,
   removeConversation,
@@ -646,6 +647,26 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
 
   return (
     <div className={'chat-root' + (variant === 'page' ? ' chat-root--page' : '')}>
+      {snapshot.permissionRequest && (
+        <div className="perm-overlay" role="dialog" aria-modal="true" aria-labelledby="perm-title">
+          <div className="perm-box">
+            <div className="perm-title" id="perm-title">AI 请求写入权限</div>
+            <div className="perm-desc">
+              当前为「只读」。允许后仅在<b>当前会话</b>切换到「可写」，AI 可以写入文件、执行命令和下载文件。
+            </div>
+            <div className="perm-reason">理由：{snapshot.permissionRequest.reason}</div>
+            <div className="perm-actions">
+              <button className="p-btn p-btn--primary" type="button" onClick={() => resolvePermissionRequest(true)}>
+                允许并切换
+              </button>
+              <button className="p-btn p-btn--outline" type="button" onClick={() => resolvePermissionRequest(false)}>
+                保持只读
+              </button>
+            </div>
+            <div className="perm-hint">仅本次对话生效；可随时用顶部权限下拉框改回只读。120 秒未操作将自动取消。</div>
+          </div>
+        </div>
+      )}
       {variant === 'page' && historyPanel}
       {dragActive && (
         <div className="drop-overlay">

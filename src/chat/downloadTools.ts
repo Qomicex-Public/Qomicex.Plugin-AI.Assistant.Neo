@@ -34,7 +34,7 @@ function gate(): { error: string } | null {
   return {
     error:
       `当前文件权限为「${modeText}」，不允许下载文件。` +
-      '请让用户在聊天顶部的权限下拉框切换为「可写」或「完全访问」后重试。',
+      '请先调用 RequestWritePermission 向用户申请提权（会弹确认窗），或让用户手动切换为「可写」或「完全访问」后重试。',
   }
 }
 

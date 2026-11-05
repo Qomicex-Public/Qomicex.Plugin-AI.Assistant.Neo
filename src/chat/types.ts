@@ -35,6 +35,14 @@ export type UiMsgKind = 'user' | 'ai' | 'thinking' | 'tool' | 'progress'
 /** 文件操作权限：只读 / 可写 / 完全访问 */
 export type FilePermission = 'readonly' | 'write' | 'full'
 
+/** AI 发起的权限提升请求（当前只支持 只读 → 可写）。 */
+export interface PermissionRequest {
+  id: number
+  reason: string
+  from: FilePermission
+  to: 'write'
+}
+
 /** 思考强度：off 时不发送 reasoning_effort 字段 */
 export type ReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'max'
 
