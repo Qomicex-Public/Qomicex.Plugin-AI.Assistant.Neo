@@ -85,7 +85,9 @@ version: 1
 | `mc-crash-debug` | 启动崩溃/闪退：日志定位、Java 对照、退出码、模组二分 |
 | `mc-instance-setup` | 新建实例：版本/加载器/Java/内存选择，安装与启动验证 |
 | `mc-mod-compat` | 模组版本/加载器/前置依赖匹配，去重与冲突排查 |
+| `mc-mod-localization` | 模组汉化：现成资源包优先，提取 lang、生成覆盖资源包、校验 |
 | `mc-modpack-install` | 本地/在线整合包安装、迁移与失败排查 |
+| `mc-modpack-localization` | 整合包汉化：先找 VM/BBSMC/CFPA 现成包，再处理任务书/指南书 |
 | `mc-server-connect` | 联机开房/加入服务器：NAT、端口、版本与模组对齐 |
 | `mc-performance-tuning` | 低帧/卡顿诊断：CPU/GPU/内存瓶颈与最小改动优化 |
 | `qomicex-diagnostics` | 启动器/插件问题：manifest、权限、代理、文件授权、进程 |
