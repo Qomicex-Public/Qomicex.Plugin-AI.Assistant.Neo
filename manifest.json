@@ -1,9 +1,12 @@
 {
   "id": "top.qomicex.assistant",
   "name": "AI 助手",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "minLauncherVersion": "0.1.4",
-  "layers": ["l2", "l3"],
+  "layers": [
+    "l2",
+    "l3"
+  ],
   "permissions": [
     "config:read",
     "config:write",
@@ -15,13 +18,24 @@
     "shell:execute",
     "ui:toast",
     "ui:sub_window",
+    "ui:inject_sidebar",
+    "ui:inject_settings",
     "download:manage",
     "instance:write",
-    "process:manage"
+    "process:manage",
+    "plugin:log"
   ],
   "dependencies": [
-    { "id": "top.qomicex.markdown", "version": ">=1.0.0", "optional": true },
-    { "id": "top.qomicex.markitdown", "version": ">=0.1.0", "optional": true }
+    {
+      "id": "top.qomicex.markdown",
+      "version": ">=1.0.0",
+      "optional": true
+    },
+    {
+      "id": "top.qomicex.markitdown",
+      "version": ">=0.1.0",
+      "optional": true
+    }
   ],
   "entry": {
     "frontend": "dist/agent.html",
@@ -36,7 +50,16 @@
         "action": "page"
       }
     ],
-    "slots": [{ "slot": "header:right", "file": "dist/slots.html", "width": 300, "height": 36 }],
-    "settingsPages": ["dist/index.html"]
+    "slots": [
+      {
+        "slot": "header:right",
+        "file": "dist/slots.html",
+        "width": 300,
+        "height": 36
+      }
+    ],
+    "settingsPages": [
+      "dist/index.html"
+    ]
   }
 }

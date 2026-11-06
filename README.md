@@ -142,6 +142,20 @@ DownloadFile({
 
 需要 `process:manage` 权限（安装/更新时会提示）。
 
+## 日志
+
+插件通过桥方法 `log(message, level?)` 写启动器 trace（需 `plugin:log` 权限），落盘在
+`{数据目录}/logs/qomicex-backend.log`，格式 `[plugin:top.qomicex.assistant:error] ...`。
+`qomicex debug` 可实时 tail。
+
+记录内容：
+
+- 请求失败（含 HTTP 状态、端点、模型、Key 状态、响应片段、栈）
+- 工具调用抛异常（工具名、参数、栈）
+
+请求失败时的气泡已是可自查的完整说明（状态码 + 服务商原因 + 端点/模型/Key 状态 + 请求 id + 响应片段）；
+需要翻旧账、或用户在另一台机器上时看日志文件。
+
 ## MCP（HTTP / SSE）
 
 设置项：

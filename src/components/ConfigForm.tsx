@@ -157,7 +157,6 @@ export default function ConfigForm({
     setBusy(false)
     if (r.error) {
       show(r.error, 'hsl(var(--destructive))')
-      setTimeout(() => show(''), 4000)
       return
     }
     setModelList(r.models.map((m) => m.id))
@@ -183,7 +182,6 @@ export default function ConfigForm({
       setTimeout(() => show(''), 2500)
     } else {
       show('测试失败: ' + (r.error || ''), 'hsl(var(--destructive))')
-      setTimeout(() => show(''), 4000)
     }
   }
 
@@ -198,10 +196,10 @@ export default function ConfigForm({
     setBusy(false)
     if (r.ok) {
       show('连接成功 ✓', 'hsl(var(--primary))')
+      setTimeout(() => show(''), 3000)
     } else {
       show('连接失败: ' + (r.error || ''), 'hsl(var(--destructive))')
     }
-    setTimeout(() => show(''), 3000)
   }
 
   async function doSave() {
@@ -408,7 +406,19 @@ export default function ConfigForm({
             返回
           </button>
         )}
-        <div style={{ fontSize: 12, color: status.color || 'hsl(var(--muted-foreground))', textAlign: 'center', minHeight: 16 }}>
+        <div
+          style={{
+            fontSize: 12,
+            color: status.color || 'hsl(var(--muted-foreground))',
+            textAlign: status.text.includes('\n') ? 'left' : 'center',
+            minHeight: 16,
+            // 失败详情是多行（端点/模型/Key/响应片段），必须保留换行
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            maxHeight: 200,
+            overflowY: 'auto',
+          }}
+        >
           {status.text}
         </div>
       </div>

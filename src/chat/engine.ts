@@ -11,7 +11,7 @@ import { setPermissionRequester, type WritePermissionResult } from './permission
 import { setToolPermission } from './fileTools.ts'
 import { setUiControlEnabled } from './uiControl.ts'
 import { workspacePromptSection, isWindowsPlatform, permissionAllows } from './permissions.ts'
-import { streamTurn, type StreamTurnCtx } from './stream.ts'
+import { streamTurn, describeHttpError, type StreamTurnCtx } from './stream.ts'
 import { compressContext, manualCompress, summarizeToolResult, estimateTokens, loadDsTokenizer, type CompressDeps } from './compress.ts'
 import { renderMd, renderMdSync } from './markdown.ts'
 import {
@@ -24,6 +24,7 @@ import {
   saveConversation,
 } from './history.ts'
 import { setCurrentConversationId } from './pending.ts'
+import { pluginLog } from '../lib/pluginLog.ts'
 
 const CURSOR = '<span class="stream-cursor">&#9621;</span>'
 
@@ -905,6 +906,13 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
           result = handler ? await handler(args) : { error: 'unknown tool' }
         } catch (e: any) {
           result = { error: e.message || String(e) }
+          // 工具抛异常时模型只看得到一行 error，落盘留原始栈便于复现
+          pluginLog('warn', '工具调用异常', {
+            tool: tc.function.name,
+            args: JSON.stringify(args).slice(0, 500),
+            error: e && e.message,
+            stack: e && e.stack,
+          })
         }
         const images = takeUiImages(result)
         uiImages.push(...images)
@@ -972,7 +980,18 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
     if (e.name === 'AbortError') {
       updateAiHtml(aiMsgId!, fullContent + '（已停止）', false)
     } else {
-      updateAiHtml(aiMsgId!, '出错了: ' + e.message, false)
+      const text = (fullContent ? fullContent + '\n\n' : '') + '⚠️ ' + (e.message || String(e))
+      // 纯文本渲染：错误信息里有响应片段，不走 Markdown/HTML，避免内容被吞或注入
+      ui = ui.map((m) => (m.id === aiMsgId ? { ...m, html: '', content: text, streaming: false } : m))
+      emit()
+      // 气泡之外再留一份：落盘到启动器日志（plugin:log），事后可查
+      pluginLog('error', '请求失败', {
+        model: state.model,
+        baseUrl: state.baseUrl,
+        keySet: !!state.apiKey,
+        message: e && e.message,
+        stack: e && e.stack,
+      })
     }
   } finally {
     // 无论正常结束、停止、还是出错，都保证当前会话落盘（历史不丢）
@@ -1005,8 +1024,7 @@ export function fetchModels(key: string, baseUrl: string): Promise<{ models: { i
     })
     .then((r: any) => {
       if (!r || r.status !== 200) {
-        const d = JSON.parse(r.body || '{}')
-        throw new Error(d.error?.message || 'HTTP ' + (r && r.status))
+        throw new Error(describeHttpError(r, { baseUrl: baseUrl, apiKey: key, path: '/models' }))
       }
       const data = JSON.parse(r.body)
       const models = data.data || []
@@ -1030,8 +1048,7 @@ export function testConnection(key: string, baseUrl: string, model: string): Pro
     })
     .then((r: any) => {
       if (r && r.status === 200) return { ok: true }
-      const d = JSON.parse((r && r.body) || '{}')
-      throw new Error(d.error?.message || 'HTTP ' + (r && r.status))
+      throw new Error(describeHttpError(r, { baseUrl: baseUrl, model: model || 'deepseek-chat', apiKey: key }))
     })
     .catch((e) => ({ ok: false, error: e.message }))
 }
@@ -1049,8 +1066,7 @@ export function testModel(key: string, baseUrl: string, model: string): Promise<
     })
     .then((r: any) => {
       if (r && r.status === 200) return { ok: true }
-      const d = JSON.parse((r && r.body) || '{}')
-      throw new Error(d.error?.message || 'HTTP ' + (r && r.status))
+      throw new Error(describeHttpError(r, { baseUrl: baseUrl, model: model, apiKey: key }))
     })
     .catch((e) => ({ ok: false, error: e.message }))
 }
