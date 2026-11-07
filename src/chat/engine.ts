@@ -28,6 +28,16 @@ import { pluginLog } from '../lib/pluginLog.ts'
 
 const CURSOR = '<span class="stream-cursor">&#9621;</span>'
 
+/**
+ * 单次提问内允许的工具调用轮数（默认值；用户可在设置里改）。
+ *
+ * 原来是硬编码 10，实测多步任务（读文件 → 改 → 构建 → 修错 → 再构建）几分钟就用完，
+ * 用户看到「工具调用次数过多」被打断，且这句提示容易被误读成被服务商限流。
+ * 默认 45：正常任务够用，同时保留上限兜底——防止模型在工具间死循环时
+ * 无限燃烧 token（每一轮都是一次完整请求）。
+ */
+export const DEFAULT_TOOL_ROUNDS = 45
+
 const WELCOME = '你好！我是 AI 助手。有什么需要帮忙的？'
 
 export interface EngineSnapshot {
@@ -49,6 +59,8 @@ export interface EngineSnapshot {
     effectivePermission: FilePermission
     /** 单次回复输出上限 */
     maxTokens: number
+    /** 单次提问内允许的工具调用轮数 */
+    maxToolRounds: number
     /** 「启动器操作」（UI 自动化）总开关 */
     uiControl: boolean
     /** 技能总开关 */
@@ -102,6 +114,8 @@ const state = {
   mcpServers: [] as McpServerConfig[],
   /** 单次回复输出上限（思考与正文共享） */
   maxTokens: 8192,
+  /** 单次提问内允许的工具调用轮数 */
+  maxToolRounds: DEFAULT_TOOL_ROUNDS,
   /** 会话级文件权限覆盖；null = 跟随全局默认 */
   permissionOverride: null as FilePermission | null,
   /** 会话级思考强度覆盖；null = 跟随全局默认 */
@@ -148,6 +162,7 @@ function buildSnapshot(): EngineSnapshot {
       filePermission: state.filePermission,
       effectivePermission: state.permissionOverride ?? state.filePermission,
       maxTokens: state.maxTokens,
+      maxToolRounds: state.maxToolRounds,
       uiControl: state.uiControl,
       skillsEnabled: state.skillsEnabled,
       skillsDir: state.skillsDir,
@@ -741,6 +756,7 @@ async function resyncGlobals(): Promise<void> {
     if (s.reasoningEffort) state.reasoningEffort = s.reasoningEffort as ReasoningEffort
     if (Array.isArray(s.modalities) && s.modalities.length) state.modalities = s.modalities as Modality[]
     if (typeof s.maxTokens === 'number' && s.maxTokens > 0) state.maxTokens = s.maxTokens
+    if (typeof s.maxToolRounds === 'number' && s.maxToolRounds > 0) state.maxToolRounds = s.maxToolRounds
     if (s.showToolProcess !== undefined) state.showToolProcess = s.showToolProcess !== false
     state.skillsEnabled = s.skillsEnabled !== false
     state.skillsDir = typeof s.skillsDir === 'string' ? s.skillsDir : ''
@@ -865,7 +881,7 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
 
   try {
     let msgs: ChatMessage[] = [{ role: 'system', content: await buildSystemPrompt() }, ...state.messages]
-    let loops = 10
+    let loops = state.maxToolRounds
     let t0 = Date.now()
     // 消息一入队就落盘一次：保证「有用户消息的会话」立刻出现在历史里
     await persistCurrent()
@@ -942,7 +958,16 @@ export async function sendMessage(text: string, parts?: MessagePart[]): Promise<
     if (loops <= 0) {
       finishThinking(thinkingId)
       ensureAiDiv()
-      updateAiHtml(aiMsgId!, '抱歉，工具调用次数过多，请重试。', false)
+      // 说清是「轮数到顶」而不是被限流；并保留已经写出的正文，别让用户以为白跑
+      const msg =
+        (fullContent ? '\n\n---\n' : '') +
+        '⚠️ 本次已连续执行 ' + state.maxToolRounds + ' 轮工具调用，达到单次提问的上限，先停在这里。\n\n' +
+        '上面已经完成的步骤都保留在对话里，直接回复「继续」即可接着做；感到频繁中断可在设置里调大「工具调用轮数上限」。'
+      fullContent = (fullContent || '') + msg
+      updateAiHtml(aiMsgId!, renderMdSync(fullContent), false, fullContent)
+      state.messages.push({ role: 'assistant', content: fullContent })
+      updateCtxDisplay()
+      addTotalTime(Date.now() - thinkingStart)
       return
     }
 
@@ -1082,6 +1107,7 @@ export function saveConfig(
     modalities?: Modality[]
     filePermission?: FilePermission
     maxTokens?: number
+    maxToolRounds?: number
     uiControl?: boolean
     skillsEnabled?: boolean
     skillsDir?: string
@@ -1106,6 +1132,7 @@ export function saveConfig(
   if (cfg.modalities) state.modalities = cfg.modalities.length ? cfg.modalities : ['text']
   if (cfg.filePermission) state.filePermission = cfg.filePermission
   if (cfg.maxTokens) state.maxTokens = cfg.maxTokens
+  if (cfg.maxToolRounds) state.maxToolRounds = cfg.maxToolRounds
   if (cfg.uiControl !== undefined) state.uiControl = cfg.uiControl === true
   if (cfg.skillsEnabled !== undefined) state.skillsEnabled = cfg.skillsEnabled === true
   if (cfg.skillsDir !== undefined) state.skillsDir = String(cfg.skillsDir || '').trim()
@@ -1131,6 +1158,7 @@ export function saveConfig(
     .then(() => api.call('setSettings', 'filePermission', state.filePermission))
     .then(() => api.call('setSettings', 'uiControl', state.uiControl))
     .then(() => api.call('setSettings', 'maxTokens', state.maxTokens))
+    .then(() => api.call('setSettings', 'maxToolRounds', state.maxToolRounds))
     .then(() => api.call('setSettings', 'modalities', state.modalities))
     .then(() => api.call('setSettings', 'skillsEnabled', state.skillsEnabled))
     .then(() => api.call('setSettings', 'skillsDir', state.skillsDir))
@@ -1195,6 +1223,10 @@ export function init(): void {
         state.filePermission = (settings.filePermission as FilePermission) || 'readonly'
         state.uiControl = settings.uiControl === true
         state.maxTokens = typeof settings.maxTokens === 'number' && settings.maxTokens > 0 ? settings.maxTokens : 8192
+        state.maxToolRounds =
+          typeof settings.maxToolRounds === 'number' && settings.maxToolRounds > 0
+            ? settings.maxToolRounds
+            : DEFAULT_TOOL_ROUNDS
         syncToolPermission()
         view = 'chat'
         // 注意：这里**不能**调用 newChat()——newChat 会生成新会话 id 并写回 cache，

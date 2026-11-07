@@ -849,6 +849,7 @@ export default function ChatView({ variant = 'overlay', initialMessage = null }:
                 modalities: snapshot.cfg.modalities,
                 filePermission: snapshot.cfg.filePermission,
                 maxTokens: snapshot.cfg.maxTokens,
+                maxToolRounds: snapshot.cfg.maxToolRounds,
                 uiControl: snapshot.cfg.uiControl,
                 skillsEnabled: snapshot.cfg.skillsEnabled,
                 skillsDir: snapshot.cfg.skillsDir,

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { getApi } from './api.ts'
 import ConfigForm, { type ConfigValues } from './components/ConfigForm.tsx'
 import type { ReasoningEffort, Modality, FilePermission } from './chat/types.ts'
+import { DEFAULT_TOOL_ROUNDS } from './chat/engine.ts'
 
 const DEFAULTS: ConfigValues = {
   baseUrl: 'https://api.deepseek.com/v1',
@@ -13,6 +14,7 @@ const DEFAULTS: ConfigValues = {
   modalities: ['text'],
   filePermission: 'readonly',
   maxTokens: 8192,
+  maxToolRounds: DEFAULT_TOOL_ROUNDS,
   uiControl: false,
   skillsEnabled: true,
   skillsDir: '',
@@ -50,6 +52,10 @@ export default function SettingsApp() {
             : ['text'],
           filePermission: (settings.filePermission as FilePermission) || 'readonly',
           maxTokens: typeof settings.maxTokens === 'number' && settings.maxTokens > 0 ? settings.maxTokens : 8192,
+          maxToolRounds:
+            typeof settings.maxToolRounds === 'number' && settings.maxToolRounds > 0
+              ? settings.maxToolRounds
+              : DEFAULT_TOOL_ROUNDS,
           uiControl: settings.uiControl === true,
           skillsEnabled: settings.skillsEnabled !== false,
           skillsDir: typeof settings.skillsDir === 'string' ? settings.skillsDir : '',

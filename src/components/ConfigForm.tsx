@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchModels as engineFetchModels, testConnection, testModel, saveConfig } from '../chat/engine.ts'
+import { fetchModels as engineFetchModels, testConnection, testModel, saveConfig, DEFAULT_TOOL_ROUNDS } from '../chat/engine.ts'
 import type { ReasoningEffort, Modality, FilePermission } from '../chat/types.ts'
 import type { McpServerConfig } from '../chat/mcp.ts'
 import CapabilitySettings from './CapabilitySettings.tsx'
@@ -15,6 +15,8 @@ export interface ConfigValues {
   filePermission: FilePermission
   /** 单次回复输出上限（思考与正文共享） */
   maxTokens: number
+  /** 单次提问内允许的工具调用轮数 */
+  maxToolRounds: number
   /** 「启动器操作」（UI 自动化）总开关，与文件权限独立 */
   uiControl: boolean
   /** 技能总开关 */
@@ -74,6 +76,15 @@ const FILE_PERMS: { value: FilePermission; label: string; hint: string }[] = [
   },
 ]
 
+/** 轮数上限取值范围：1 轮没意义（一次工具都调不了），200 轮已远超实际需要。 */
+const MIN_TOOL_ROUNDS = 1
+const MAX_TOOL_ROUNDS = 200
+
+function clampRounds(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_TOOL_ROUNDS
+  return Math.min(MAX_TOOL_ROUNDS, Math.max(MIN_TOOL_ROUNDS, Math.round(n)))
+}
+
 export default function ConfigForm({
   initial,
   onSaved,
@@ -91,6 +102,9 @@ export default function ConfigForm({
   const [modalities, setModalities] = useState<Modality[]>(initial.modalities?.length ? initial.modalities : ['text'])
   const [filePermission, setFilePermission] = useState<FilePermission>(initial.filePermission || 'readonly')
   const [maxTokens, setMaxTokens] = useState<number>(initial.maxTokens || 8192)
+  const [maxToolRounds, setMaxToolRounds] = useState<number>(
+    clampRounds(initial.maxToolRounds || DEFAULT_TOOL_ROUNDS),
+  )
   const [uiControl, setUiControl] = useState<boolean>(initial.uiControl === true)
   const [skillsEnabled, setSkillsEnabled] = useState<boolean>(initial.skillsEnabled !== false)
   const [skillsDir, setSkillsDir] = useState<string>(initial.skillsDir || '')
@@ -116,6 +130,7 @@ export default function ConfigForm({
     setModalities(initial.modalities?.length ? initial.modalities : ['text'])
     setFilePermission(initial.filePermission || 'readonly')
     setMaxTokens(initial.maxTokens || 8192)
+    setMaxToolRounds(clampRounds(initial.maxToolRounds || DEFAULT_TOOL_ROUNDS))
     setUiControl(initial.uiControl === true)
     setSkillsEnabled(initial.skillsEnabled !== false)
     setSkillsDir(initial.skillsDir || '')
@@ -132,6 +147,7 @@ export default function ConfigForm({
     initial.reasoningEffort,
     initial.filePermission,
     initial.maxTokens,
+    initial.maxToolRounds,
     initial.uiControl,
     initial.skillsEnabled,
     initial.skillsDir,
@@ -224,6 +240,7 @@ export default function ConfigForm({
         modalities: modes,
         filePermission,
         maxTokens,
+        maxToolRounds,
         uiControl,
         skillsEnabled,
         skillsDir,
@@ -318,6 +335,24 @@ export default function ConfigForm({
           </div>
           <div className="field-hint">
             思考过程与正文**共享**这一上限。开启较高思考强度时，若上限太小，模型可能把预算全花在思考上导致正文为空。
+          </div>
+        </div>
+
+        <div>
+          <label className="p-label">工具调用轮数上限</label>
+          <div className="field-row">
+            <input
+              className="p-input"
+              type="number"
+              min={1}
+              max={200}
+              value={maxToolRounds}
+              onChange={(e) => setMaxToolRounds(clampRounds(parseInt(e.target.value) || DEFAULT_TOOL_ROUNDS))}
+            />
+          </div>
+          <div className="field-hint">
+            一次提问内允许 AI 连续调用工具的最大轮数，默认 {DEFAULT_TOOL_ROUNDS}。多步任务（读文件 → 改 → 构建 → 修错）
+            容易被耗尽；调大会延长单次任务时长，也意味着出错时烧掉更多 token。达到上限时会保留已完成内容，回复「继续」即可接着做。
           </div>
         </div>
 
